@@ -172,7 +172,6 @@ namespace ChatRelay.Backends
             // prompt (history lives on Anthropic's side).
             _cli.SessionId = request.SessionId;
             _cli.Model = string.IsNullOrEmpty(request.Model) ? null : request.Model;
-            _cli.PermissionMode = request.PermissionMode;
             _cli.McpConfigPath = request.McpConfigPath;
             _cli.WorkingDirectory = request.WorkingDirectory;
             _cli.PermissionPromptTool = request.PermissionPromptTool;
@@ -181,7 +180,7 @@ namespace ChatRelay.Backends
             _cli.AdditionalDirectories = request.AdditionalDirectories;
 
             ExtensionLogger.Info(AdapterId,
-                $"Send: model={_cli.Model ?? "<default>"} mode={_cli.PermissionMode ?? "<default>"} " +
+                $"Send: model={_cli.Model ?? "<default>"} " +
                 $"resume={!string.IsNullOrEmpty(_cli.SessionId)} " +
                 $"mcp={!string.IsNullOrEmpty(_cli.McpConfigPath)} " +
                 $"broker={!string.IsNullOrEmpty(_cli.PermissionPromptTool)} " +
