@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Wire-level data shapes shared between the host and any .NET shell.
+
+    Targets netstandard2.0 so it loads under both the VSIX (net48) and the
+    host (net10) without multi-targeting. No behavior lives here — only
+    records / classes / enums plus the JSON attributes that pin their on-the-
+    wire and on-disk shape. Anything that does I/O (SettingsStore, Mcp parsing
+    / pumps, etc.) stays in ChatRelay.Core.
+
+    A non-.NET shell (Rider, VSCode) does not consume this assembly directly;
+    it mirrors the same DTOs in its native language. The point of *this*
+    project is to collapse the .NET-side duplication that previously had a
+    mirror Protocol.cs in the VSIX.
+  -->
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>ChatRelay</RootNamespace>
+    <AssemblyName>ChatRelay.Contracts</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- For [JsonPropertyName], [JsonStringEnumConverter], JsonIgnoreCondition. -->
+    <PackageReference Include="System.Text.Json" Version="9.0.0" />
+  </ItemGroup>
+
+</Project>

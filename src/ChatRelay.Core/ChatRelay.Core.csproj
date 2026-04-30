@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>ChatRelay</RootNamespace>
+    <AssemblyName>ChatRelay.Core</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Wire/data shapes (ExtensionSettings, McpConfig, …) live here so the
+         VSIX can use the exact same types without referencing Core. -->
+    <ProjectReference Include="..\ChatRelay.Contracts\ChatRelay.Contracts.csproj" />
+    <!-- Vertical slices peeled out of Core in phase 2. Core itself now
+         only contains the Backends adapter framework, the Mcp runtime /
+         transports, and small Paths utilities. -->
+    <ProjectReference Include="..\ChatRelay.Logging\ChatRelay.Logging.csproj" />
+    <ProjectReference Include="..\ChatRelay.Settings\ChatRelay.Settings.csproj" />
+  </ItemGroup>
+
+</Project>

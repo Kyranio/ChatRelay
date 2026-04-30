@@ -1,0 +1,18 @@
+<Solution>
+  <Project Path="src/ChatRelay.Contracts/ChatRelay.Contracts.csproj" />
+  <Project Path="src/ChatRelay.Logging/ChatRelay.Logging.csproj" />
+  <Project Path="src/ChatRelay.Settings/ChatRelay.Settings.csproj" />
+  <Project Path="src/ChatRelay.Sessions/ChatRelay.Sessions.csproj" />
+  <Project Path="src/ChatRelay.Permissions/ChatRelay.Permissions.csproj" />
+  <Project Path="src/ChatRelay.Core/ChatRelay.Core.csproj" />
+  <Project Path="src/ChatRelay.Adapter.ClaudeCli/ChatRelay.Adapter.ClaudeCli.csproj" />
+  <Project Path="src/ChatRelay.Adapter.ClaudeApi/ChatRelay.Adapter.ClaudeApi.csproj" />
+  <Project Path="src/ChatRelay.Adapter.Ollama/ChatRelay.Adapter.Ollama.csproj" />
+  <Project Path="src/ChatRelay.Host/ChatRelay.Host.csproj" />
+  <Project Path="src/ChatRelay.Shell.Console/ChatRelay.Shell.Console.csproj" />
+  <Project Path="src/ChatRelay.IntegrationTests/ChatRelay.IntegrationTests.csproj" />
+  <Project Path="src/ChatRelay.PermissionBroker/ChatRelay.PermissionBroker.csproj" />
+  <Project Path="src/ChatRelay.VisualStudio/ChatRelay.VisualStudio.csproj">
+    <Deploy />
+  </Project>
+</Solution>

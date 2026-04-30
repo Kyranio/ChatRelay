@@ -1,0 +1,98 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>12</LangVersion>
+    <UseWPF>true</UseWPF>
+    <RootNamespace>ChatRelay</RootNamespace>
+    <AssemblyName>ChatRelay</AssemblyName>
+
+    <VSSDKBuildToolsAutoSetup>true</VSSDKBuildToolsAutoSetup>
+    <GeneratePkgDefFile>true</GeneratePkgDefFile>
+    <IncludeAssemblyInVSIXContainer>true</IncludeAssemblyInVSIXContainer>
+    <IncludeDebugSymbolsInVSIXContainer>false</IncludeDebugSymbolsInVSIXContainer>
+    <IncludeDebugSymbolsInLocalVSIXDeployment>false</IncludeDebugSymbolsInLocalVSIXDeployment>
+    <CopyBuildOutputToOutputDirectory>true</CopyBuildOutputToOutputDirectory>
+    <CopyOutputSymbolsToOutputDirectory>false</CopyOutputSymbolsToOutputDirectory>
+
+    <!-- Threading analyzer noise that doesn't reflect real bugs in our usage:
+         VSSDK007  false positive on FileAndForget pattern
+         VSTHRD010 can't prove UI-thread call sites the analyzer doesn't trace
+         VSTHRD100 async-void on WPF event handlers; bodies wrap in try/catch
+         VSTHRD101 follow-on of VSTHRD100
+         VSTHRD200 'Async' suffix style preference -->
+    <NoWarn>$(NoWarn);VSSDK007;VSTHRD010;VSTHRD100;VSTHRD101;VSTHRD200</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectCapability Include="CreateVsixContainer" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Community.VisualStudio.Toolkit.17" Version="17.0.551" />
+    <PackageReference Include="Markdig.Wpf" Version="0.5.0.1" />
+    <PackageReference Include="ColorCodeStandard" Version="1.0.0" />
+    <PackageReference Include="Microsoft.VisualStudio.SDK" Version="17.14.40265" ExcludeAssets="runtime" />
+    <PackageReference Include="Microsoft.VSSDK.BuildTools" Version="18.5.40005" />
+    <PackageReference Include="StreamJsonRpc" Version="2.22.11" />
+    <PackageReference Include="System.Text.Json" Version="9.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Wire DTOs (Protocol records, ExtensionSettings, McpConfig). Single
+         source of truth shared with the host. The shell does NOT reference
+         ChatRelay.Core — that's net10. Contracts is netstandard2.0. -->
+    <ProjectReference Include="..\ChatRelay.Contracts\ChatRelay.Contracts.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <VSCTCompile Include="ChatRelay.vsct">
+      <ResourceName>Menus.ctmenu</ResourceName>
+    </VSCTCompile>
+  </ItemGroup>
+
+  <Target Name="PublishChatRelayHost" BeforeTargets="BeforeBuild;PrepareForBuild">
+    <MSBuild Projects="..\ChatRelay.Host\ChatRelay.Host.csproj"
+             Properties="Configuration=$(Configuration);RuntimeIdentifier=win-x64;SelfContained=true;PublishSingleFile=true"
+             Targets="Publish"
+             RemoveProperties="TargetFramework" />
+  </Target>
+
+  <Target Name="PublishPermissionBroker" BeforeTargets="BeforeBuild;PrepareForBuild">
+    <MSBuild Projects="..\ChatRelay.PermissionBroker\ChatRelay.PermissionBroker.csproj"
+             Properties="Configuration=$(Configuration);RuntimeIdentifier=win-x64;SelfContained=true;PublishSingleFile=true"
+             Targets="Publish"
+             RemoveProperties="TargetFramework" />
+  </Target>
+
+  <ItemGroup>
+    <Content Include="..\ChatRelay.Host\bin\$(Configuration)\net10.0\win-x64\publish\ChatRelay.Host.exe">
+      <Link>ChatRelay.Host.exe</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <IncludeInVSIX>true</IncludeInVSIX>
+    </Content>
+
+    <Content Include="..\ChatRelay.PermissionBroker\bin\$(Configuration)\net10.0\win-x64\publish\ChatRelay.PermissionBroker.exe">
+      <Link>ChatRelay.PermissionBroker.exe</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <IncludeInVSIX>true</IncludeInVSIX>
+    </Content>
+
+    <Content Include="..\..\LICENSE">
+      <Link>LICENSE</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <IncludeInVSIX>true</IncludeInVSIX>
+    </Content>
+  </ItemGroup>
+
+  <Target Name="IncludeMenusInVsix" AfterTargets="VSCTCompile" BeforeTargets="GetVsixSourceItems">
+    <ItemGroup>
+      <VSIXSourceItem Include="$(IntermediateOutputPath)$(AssemblyName).cto">
+        <VSIXSubPath></VSIXSubPath>
+        <TargetPath>Menus.ctmenu</TargetPath>
+      </VSIXSourceItem>
+    </ItemGroup>
+  </Target>
+
+</Project>

@@ -1,0 +1,208 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Threading;
+using System.Threading.Tasks;
+using ChatRelay.Logging;
+
+namespace ChatRelay.Backends
+{
+    /// <summary>
+    /// Adapter over the local <c>claude</c> CLI. Stateful: re-uses Anthropic's
+    /// server-side session via <c>--resume</c>, so we never need to send
+    /// conversation history. Model list is hand-curated against what the
+    /// current CLI accepts on <c>--model</c> — the CLI doesn't expose an
+    /// "enumerate models" command.
+    /// </summary>
+    public class ClaudeCliAdapter : AiAdapterBase
+    {
+        public const string AdapterId = "claude-cli";
+
+        // How long to wait for `claude --version` before declaring the CLI
+        // unavailable. The command is local and should answer in well under
+        // a second — anything longer means the install is broken or PATH
+        // resolution is hitting a network drive.
+        private static readonly TimeSpan VersionProbeBudget = TimeSpan.FromSeconds(3);
+
+        public override string Id => AdapterId;
+        public override string DisplayName => "Claude CLI";
+
+        public override AiCapabilities Capabilities { get; } = new AiCapabilities
+        {
+            StatefulSessions = true,
+            PermissionModes = true,
+            Streaming = false
+        };
+
+        private readonly ClaudeCliService _cli = new ClaudeCliService();
+
+        public ClaudeCliAdapter()
+        {
+            _cli.MessageReceived += (s, e) =>
+            {
+                switch (e.Type)
+                {
+                    case ClaudeEventType.System:
+                        var model = ModelNameFormatter.TryExtractFromSystemEvent(e.Content, null);
+                        if (!string.IsNullOrEmpty(model))
+                            RaiseMessage(new AiMessageEvent
+                            {
+                                Kind = AiEventKind.ModelInfo,
+                                ModelDisplayName = model
+                            });
+                        // Session id is captured inside ClaudeCliService; surface
+                        // it after each event so the UI can pick it up.
+                        if (!string.IsNullOrEmpty(_cli.SessionId))
+                            RaiseMessage(new AiMessageEvent
+                            {
+                                Kind = AiEventKind.SessionUpdate,
+                                SessionId = _cli.SessionId
+                            });
+                        break;
+
+                    case ClaudeEventType.AssistantMessage:
+                        // Emit thinking first so the control can attach it to
+                        // the bubble this text block produces. An assistant
+                        // event can contain thinking, text, or both.
+                        if (!string.IsNullOrEmpty(e.Thinking))
+                            RaiseMessage(new AiMessageEvent
+                            {
+                                Kind = AiEventKind.ThinkingMessage,
+                                Content = e.Thinking
+                            });
+                        if (!string.IsNullOrEmpty(e.Content))
+                            RaiseMessage(new AiMessageEvent
+                            {
+                                Kind = AiEventKind.AssistantMessage,
+                                Content = e.Content
+                            });
+                        break;
+
+                    case ClaudeEventType.Result when e.HasUsage:
+                        // Emit the aggregated per-turn totals (includes tool-use
+                        // hops). The result event arrives after all assistants
+                        // so the UI already has a bubble to stamp onto.
+                        RaiseMessage(new AiMessageEvent
+                        {
+                            Kind = AiEventKind.UsageUpdate,
+                            Usage = new AiUsage
+                            {
+                                InputTokens = e.InputTokens,
+                                OutputTokens = e.OutputTokens,
+                                CacheReadTokens = e.CacheReadTokens,
+                                CacheWriteTokens = e.CacheWriteTokens,
+                                CostUsd = e.CostUsd
+                            }
+                        });
+                        break;
+                }
+            };
+            _cli.ErrorReceived += (s, err) =>
+                RaiseError(err);
+        }
+
+        public override async Task<bool> IsAvailableAsync(CancellationToken ct)
+        {
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "claude",
+                    Arguments = "--version",
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                using (var proc = new Process { StartInfo = psi })
+                using (var linked = CancellationTokenSource.CreateLinkedTokenSource(ct))
+                {
+                    proc.Start();
+                    linked.CancelAfter(VersionProbeBudget);
+                    try
+                    {
+                        await proc.WaitForExitAsync(linked.Token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                    {
+                        // Probe deadline expired — kill and report unavailable.
+                        try { proc.Kill(); } catch { }
+                        ExtensionLogger.Warn(AdapterId, "claude --version timed out");
+                        return false;
+                    }
+                    var ok = proc.ExitCode == 0;
+                    ExtensionLogger.Info(AdapterId, ok ? "CLI detected" : $"claude --version exit {proc.ExitCode}");
+                    return ok;
+                }
+            }
+            catch (Exception ex)
+            {
+                ExtensionLogger.Info(AdapterId, "CLI not available: " + ex.Message);
+                return false;
+            }
+        }
+
+        public override Task<IReadOnlyList<AiModel>> ListModelsAsync(CancellationToken ct)
+        {
+            // The CLI's --model flag accepts a short alias (opus/sonnet/haiku)
+            // or a pinned id. We expose the aliases here; version labels are
+            // informational — the CLI picks the concrete pinned model.
+            IReadOnlyList<AiModel> list = new List<AiModel>
+            {
+                Make("",       "Default",  ""),
+                Make("opus",   "Opus",     "latest"),
+                Make("sonnet", "Sonnet",   "latest"),
+                Make("haiku",  "Haiku",    "latest")
+            };
+            return Task.FromResult(list);
+        }
+
+        private AiModel Make(string id, string name, string version) => new AiModel
+        {
+            AdapterId = Id,
+            AdapterDisplayName = DisplayName,
+            Id = id,
+            DisplayName = name,
+            Version = version
+        };
+
+        public override async Task SendPromptAsync(AiRequest request, CancellationToken ct)
+        {
+            // Resume the server-side session if we have one; send just the
+            // prompt (history lives on Anthropic's side).
+            _cli.SessionId = request.SessionId;
+            _cli.Model = string.IsNullOrEmpty(request.Model) ? null : request.Model;
+            _cli.PermissionMode = request.PermissionMode;
+            _cli.McpConfigPath = request.McpConfigPath;
+            _cli.WorkingDirectory = request.WorkingDirectory;
+            _cli.PermissionPromptTool = request.PermissionPromptTool;
+            _cli.AllowedTools = request.AllowedTools;
+            _cli.DisallowedTools = request.DisallowedTools;
+            _cli.AdditionalDirectories = request.AdditionalDirectories;
+
+            ExtensionLogger.Info(AdapterId,
+                $"Send: model={_cli.Model ?? "<default>"} mode={_cli.PermissionMode ?? "<default>"} " +
+                $"resume={!string.IsNullOrEmpty(_cli.SessionId)} " +
+                $"mcp={!string.IsNullOrEmpty(_cli.McpConfigPath)} " +
+                $"broker={!string.IsNullOrEmpty(_cli.PermissionPromptTool)} " +
+                $"allow={_cli.AllowedTools?.Count ?? 0} deny={_cli.DisallowedTools?.Count ?? 0} " +
+                $"promptLen={request.Prompt?.Length ?? 0}");
+
+            try
+            {
+                await _cli.SendPromptAsync(request.Prompt ?? string.Empty, ct).ConfigureAwait(false);
+            }
+            finally
+            {
+                // Emit one final session update so the caller picks up any id
+                // assigned on this turn.
+                if (!string.IsNullOrEmpty(_cli.SessionId))
+                    RaiseMessage(new AiMessageEvent
+                    {
+                        Kind = AiEventKind.SessionUpdate,
+                        SessionId = _cli.SessionId
+                    });
+            }
+        }
+    }
+}

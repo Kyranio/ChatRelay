@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Tiny leaf project: one static class (ExtensionLogger) writing one
+    log-per-day file under %LocalAppData%\ChatRelay\logs\. Has no
+    project dependencies so every other ChatRelay.* project can
+    reference it without circular-dep risk.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>ChatRelay</RootNamespace>
+    <AssemblyName>ChatRelay.Logging</AssemblyName>
+  </PropertyGroup>
+
+</Project>

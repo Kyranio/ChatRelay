@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    JSON-backed user-settings store (settings.json under %LocalAppData%).
+    The DTO shapes (ExtensionSettings, GeneralSettings, …) live in
+    ChatRelay.Contracts so the wire and on-disk shape are identical;
+    this assembly only contains the I/O glue (load, save, migrate).
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>ChatRelay</RootNamespace>
+    <AssemblyName>ChatRelay.Settings</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ChatRelay.Contracts\ChatRelay.Contracts.csproj" />
+    <ProjectReference Include="..\ChatRelay.Logging\ChatRelay.Logging.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,114 @@
+# ---------------------------------------------------------------
+# Build output
+# ---------------------------------------------------------------
+[Bb]in/
+[Oo]bj/
+[Oo]ut/
+[Bb]uild/
+[Dd]ebug/
+[Rr]elease/
+[Ll]og/
+[Ll]ogs/
+*.vsix
+*.pdb
+*.dll
+*.exe
+
+# Exceptions: re-include legitimate source binaries if ever needed
+# (no project resources today, so nothing to un-ignore).
+
+# ---------------------------------------------------------------
+# Visual Studio / Rider / JetBrains user state
+# ---------------------------------------------------------------
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+*.userprefs
+*.userosscache
+*.sln.docstates
+*.vspscc
+*.vssscc
+*.ncb
+*.opendb
+*.opensdf
+*.sdf
+*.cachefile
+*.psess
+*.vsp
+*.vspx
+*.sap
+
+# ---------------------------------------------------------------
+# Claude Code / agent-tooling session state
+# ---------------------------------------------------------------
+# .claude/ stores per-machine allowlists, memory links, and
+# Claude Code transcripts — absolutely must not ship to a public
+# repo (contains absolute paths, usernames, and workflow history).
+.claude/
+
+# ---------------------------------------------------------------
+# NuGet / MSBuild
+# ---------------------------------------------------------------
+*.nupkg
+*.snupkg
+packages/
+!packages/build/
+*.nuget.props
+*.nuget.targets
+project.lock.json
+project.fragment.lock.json
+artifacts/
+BenchmarkDotNet.Artifacts/
+
+# ---------------------------------------------------------------
+# .NET compiler / test output
+# ---------------------------------------------------------------
+*.svclog
+*.tlog
+*.dbmdl
+*.jfm
+*.tss
+*.tmp
+*.trx
+*.coverage
+*.coveragexml
+_chutzpah*
+_TeamCity*
+
+# ---------------------------------------------------------------
+# Windows
+# ---------------------------------------------------------------
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ---------------------------------------------------------------
+# Local-only files that SHOULDN'T be committed
+# ---------------------------------------------------------------
+# Environment overrides
+.env
+.env.local
+.env.*.local
+*.env
+
+# Local settings that might carry secrets
+appsettings.Local.json
+*.local.json
+
+# Personal notes / scratch pads
+SCRATCH.md
+NOTES.md
+TODO.local.md
+
+# ---------------------------------------------------------------
+# Things we DO want to commit (documented for future-me)
+# ---------------------------------------------------------------
+# - Properties/launchSettings.json (shared F5 profile, not
+#   per-developer; we configured it deliberately to open the
+#   Experimental Instance with the solution loaded)
+# - source.extension.vsixmanifest
+# - ChatRelay.vsct + generated VSCommandTable.cs
+# - .chatrelay.mcp.json test fixtures if we add any

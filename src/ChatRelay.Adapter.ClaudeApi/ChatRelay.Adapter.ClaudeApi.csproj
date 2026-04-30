@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>ChatRelay.Backends</RootNamespace>
+    <AssemblyName>ChatRelay.Adapter.ClaudeApi</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ChatRelay.Core\ChatRelay.Core.csproj" />
+  </ItemGroup>
+
+</Project>

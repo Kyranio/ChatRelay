@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Chat-session domain + persistence. Owns:
+      - ChatSession           (INPC dropdown model)
+      - ReferenceItem         (pinned-reference data + merge logic)
+      - SessionStore          (JSON persistence under
+                               %LocalAppData%\ChatRelay\sessions\<sha1>.json,
+                               versioned envelope)
+    Wire shapes (SessionMessage, SessionSummary, OpenSessionResult, …)
+    live in ChatRelay.Contracts; the host translates between the two.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>ChatRelay</RootNamespace>
+    <AssemblyName>ChatRelay.Sessions</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ChatRelay.Logging\ChatRelay.Logging.csproj" />
+  </ItemGroup>
+
+</Project>

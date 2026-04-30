@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "Experimental Instance (VS 2026)": {
+      "commandName": "Executable",
+      "executablePath": "$(DevEnvDir)devenv.exe",
+      "commandLineArgs": "/rootSuffix Exp \"$(SolutionDir)ChatRelay.slnx\"",
+      "workingDirectory": "$(SolutionDir)"
+    }
+  }
+}

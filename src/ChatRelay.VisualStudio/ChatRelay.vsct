@@ -1,0 +1,68 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<CommandTable xmlns="http://schemas.microsoft.com/VisualStudio/2005-10-18/CommandTable" xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <Extern href="stdidcmd.h"/>
+  <Extern href="vsshlids.h"/>
+
+  <Commands package="guidClaudePackage">
+
+    <Groups>
+      <!-- Tools menu -->
+      <Group guid="guidClaudeCmdSet" id="ClaudeToolsGroup" priority="0x0600">
+        <Parent guid="guidSHLMainMenu" id="IDM_VS_MENU_TOOLS"/>
+      </Group>
+      <!-- Editor right-click menu -->
+      <Group guid="guidClaudeCmdSet" id="ClaudeContextGroup" priority="0x0100">
+        <Parent guid="guidSHLMainMenu" id="IDM_VS_CTXT_CODEWIN"/>
+      </Group>
+      <!-- Solution Explorer file right-click menu (ITEMNODE = file items, not folders/projects). -->
+      <Group guid="guidClaudeCmdSet" id="ClaudeSolutionExplorerGroup" priority="0x0100">
+        <Parent guid="guidSHLMainMenu" id="IDM_VS_CTXT_ITEMNODE"/>
+      </Group>
+    </Groups>
+
+    <Buttons>
+      <Button guid="guidClaudeCmdSet" id="cmdidOpenChatWindow" priority="0x0100" type="Button">
+        <Parent guid="guidClaudeCmdSet" id="ClaudeToolsGroup"/>
+        <Strings>
+          <ButtonText>Open ChatRelay</ButtonText>
+          <CanonicalName>.ChatRelay.OpenChatWindow</CanonicalName>
+        </Strings>
+      </Button>
+
+      <Button guid="guidClaudeCmdSet" id="cmdidSendSelection" priority="0x0101" type="Button">
+        <Parent guid="guidClaudeCmdSet" id="ClaudeContextGroup"/>
+        <Strings>
+          <ButtonText>Send Selection to ChatRelay</ButtonText>
+          <CanonicalName>.ChatRelay.SendSelection</CanonicalName>
+        </Strings>
+      </Button>
+
+      <Button guid="guidClaudeCmdSet" id="cmdidAddFileToClaude" priority="0x0100" type="Button">
+        <Parent guid="guidClaudeCmdSet" id="ClaudeSolutionExplorerGroup"/>
+        <Strings>
+          <ButtonText>Add to ChatRelay</ButtonText>
+          <CanonicalName>.ChatRelay.AddFileToChatRelay</CanonicalName>
+        </Strings>
+      </Button>
+    </Buttons>
+  </Commands>
+
+  <KeyBindings>
+    <!-- Ctrl+Alt+S sends the current selection to Claude. -->
+    <KeyBinding guid="guidClaudeCmdSet" id="cmdidSendSelection"
+                editor="guidVSStd97" key1="S" mod1="Control Alt"/>
+  </KeyBindings>
+
+  <Symbols>
+    <GuidSymbol name="guidClaudePackage" value="{d4f5a1b2-1234-5678-9abc-def012345678}"/>
+
+    <GuidSymbol name="guidClaudeCmdSet" value="{b2c3d4e5-6789-abcd-ef01-23456789abcd}">
+      <IDSymbol name="ClaudeToolsGroup" value="0x1020"/>
+      <IDSymbol name="ClaudeContextGroup" value="0x1021"/>
+      <IDSymbol name="ClaudeSolutionExplorerGroup" value="0x1022"/>
+      <IDSymbol name="cmdidOpenChatWindow" value="0x0100"/>
+      <IDSymbol name="cmdidSendSelection" value="0x0101"/>
+      <IDSymbol name="cmdidAddFileToClaude" value="0x0102"/>
+    </GuidSymbol>
+  </Symbols>
+</CommandTable>

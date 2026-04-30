@@ -1,0 +1,42 @@
+# Normalise line endings across platforms. Everything in this repo is
+# developed on Windows but the git history stays clean for contributors
+# cloning on macOS/Linux.
+
+# Default: let git detect, normalise to LF in the repo, check out native.
+* text=auto
+
+# Source / config / docs — always LF in repo
+*.cs       text eol=lf
+*.xaml     text eol=lf
+*.csproj   text eol=lf
+*.slnx     text eol=lf
+*.json     text eol=lf
+*.md       text eol=lf
+*.yml      text eol=lf
+*.yaml     text eol=lf
+*.gitignore text eol=lf
+*.gitattributes text eol=lf
+*.editorconfig text eol=lf
+
+# Windows-specific files that VS / Windows tooling expects CRLF
+*.sln      text eol=crlf
+*.vcxproj  text eol=crlf
+*.vcxproj.filters text eol=crlf
+*.bat      text eol=crlf
+*.cmd      text eol=crlf
+*.ps1      text eol=crlf
+
+# Binaries - never munge
+*.vsix    binary
+*.ico     binary
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.gif     binary
+*.pdb     binary
+*.dll     binary
+*.exe     binary
+*.snk     binary
+
+# Collapse generated files in PR diffs
+ChatRelay/VSCommandTable.cs linguist-generated=true
