@@ -62,7 +62,13 @@ public sealed class ProtocolTests : IClassFixture<HostFixture>
             "openSession", new { sessionId = (string?)null });
         Assert.Equal(JsonValueKind.Object, result.ValueKind);
         Assert.True(result.TryGetProperty("sessionId", out var id));
-        Assert.False(string.IsNullOrEmpty(id.GetString()));
+        var sid = id.GetString();
+        Assert.False(string.IsNullOrEmpty(sid));
+
+        // Clean up the empty session we just created so we don't accumulate
+        // orphans in the no-solution bucket on the test machine.
+        await _fx.Rpc.InvokeWithParameterObjectAsync(
+            "deleteSession", new { sessionId = sid });
     }
 
     [Fact]

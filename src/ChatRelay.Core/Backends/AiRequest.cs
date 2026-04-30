@@ -31,9 +31,6 @@ namespace ChatRelay.Backends
         /// <summary>Adapter-specific model id (from <see cref="AiModel.Id"/>). Null means "adapter default".</summary>
         public string? Model { get; set; }
 
-        /// <summary>CLI-style permission-mode hint. Adapters ignore it unless <see cref="AiCapabilities.PermissionModes"/> is true.</summary>
-        public string? PermissionMode { get; set; }
-
         /// <summary>Tool patterns pre-approved for this send (CLI <c>--allowedTools</c>). Null/empty omits the flag.</summary>
         public IReadOnlyList<string>? AllowedTools { get; set; }
 

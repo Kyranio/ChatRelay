@@ -33,15 +33,6 @@ public class ClaudeCliService
         set => _sessionId = value;
     }
 
-    /// <summary>
-    /// CLI <c>--permission-mode</c> value (<c>acceptEdits</c> /
-    /// <c>bypassPermissions</c> / <c>plan</c>). The sentinel
-    /// <c>"dangerous-skip"</c> is translated to the standalone
-    /// <c>--dangerously-skip-permissions</c> flag instead — it's a separate
-    /// CLI option, not a mode value. Null omits both.
-    /// </summary>
-    public string? PermissionMode { get; set; }
-
     /// <summary>Tool patterns for <c>--allowedTools</c>; null/empty omits the flag.</summary>
     public IReadOnlyList<string>? AllowedTools { get; set; }
 
@@ -89,14 +80,6 @@ public class ClaudeCliService
         // which meant a path / pattern with a literal " would slice the
         // command line open.
         var sb = new StringBuilder("-p --output-format stream-json --verbose");
-
-        // Permission-mode is a regular --permission-mode <value>, EXCEPT for
-        // the sentinel "dangerous-skip" which maps to the separate
-        // --dangerously-skip-permissions toggle.
-        if (PermissionMode == "dangerous-skip")
-            sb.Append(" --dangerously-skip-permissions");
-        else if (!string.IsNullOrEmpty(PermissionMode))
-            sb.Append(" --permission-mode ").Append(QuoteArg(PermissionMode));
 
         if (!string.IsNullOrEmpty(Model))
             sb.Append(" --model ").Append(QuoteArg(Model));

@@ -289,7 +289,7 @@
                                    Opacity="0.7"
                                    FontSize="11"
                                    TextWrapping="Wrap">
-                            Tools in this list are always refused regardless of permission mode.
+                            Tools in this list are always refused, no approval prompt.
                             Passed as <Run FontFamily="Consolas" Text="--disallowedTools"/>.
                         </TextBlock>
                         <Border BorderBrush="{DynamicResource {x:Static vs:EnvironmentColors.ComboBoxBorderBrushKey}}"
