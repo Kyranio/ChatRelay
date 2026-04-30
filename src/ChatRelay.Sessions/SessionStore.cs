@@ -23,13 +23,6 @@ namespace ChatRelay.Chat
             "ChatRelay",
             "sessions");
 
-        // Legacy global file — migrated into the "no solution" bucket on
-        // first access so no one loses their Chat 1 when they upgrade.
-        private static readonly string LegacyPath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "ChatRelay",
-            "sessions.json");
-
         private static readonly JsonSerializerOptions JsonOptions = new JsonSerializerOptions
         {
             WriteIndented = true,
@@ -84,13 +77,9 @@ namespace ChatRelay.Chat
         /// <summary>
         /// Load sessions for the given solution path. Null / empty means
         /// "no solution open" — we return the shared bucket for that.
-        /// First call ever also upgrades the old global <c>sessions.json</c>
-        /// into the no-solution bucket so pre-scoping chats aren't lost.
         /// </summary>
         public static List<PersistedSession> Load(string? solutionPath)
         {
-            MigrateLegacyIfNeeded();
-
             var path = StoragePathFor(solutionPath);
             try
             {
@@ -252,40 +241,6 @@ namespace ChatRelay.Chat
                     Text = $"[Older history truncated — {drop} earlier message(s) dropped to keep this session file bounded.]",
                     Timestamp = DateTime.Now
                 });
-            }
-        }
-
-        // One-shot upgrade of %LocalAppData%\ChatRelay\sessions.json (the
-        // pre-scoping location) into the shared "no solution" bucket, so a
-        // user's existing chats survive the switch. Safe to call repeatedly —
-        // becomes a no-op as soon as the legacy file is gone.
-        private static bool _legacyMigrated;
-        private static void MigrateLegacyIfNeeded()
-        {
-            if (_legacyMigrated) return;
-            _legacyMigrated = true;
-
-            try
-            {
-                if (!File.Exists(LegacyPath)) return;
-                Directory.CreateDirectory(BaseDirectory);
-                var target = StoragePathFor(null);
-                if (!File.Exists(target))
-                {
-                    File.Move(LegacyPath, target);
-                    ExtensionLogger.Info("sessions", "Migrated legacy sessions.json → " + target);
-                }
-                else
-                {
-                    // Someone already has a no-solution bucket; keep it and
-                    // archive the legacy file rather than clobbering.
-                    File.Move(LegacyPath, LegacyPath + ".migrated");
-                    ExtensionLogger.Info("sessions", "Legacy sessions.json archived (bucket already existed)");
-                }
-            }
-            catch (Exception ex)
-            {
-                ExtensionLogger.Warn("sessions", "Legacy migration failed", ex);
             }
         }
     }

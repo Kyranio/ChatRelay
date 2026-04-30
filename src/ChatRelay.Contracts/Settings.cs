@@ -77,17 +77,6 @@ public class GeneralSettings
     /// traces don't flood the chat.
     /// </summary>
     public bool ThinkingExpandedByDefault { get; set; } = false;
-
-    /// <summary>
-    /// **Legacy — read only during migration.** Lived here in earlier
-    /// versions; moved to <see cref="PermissionSettings.AdditionalDirectories"/>
-    /// with a one-shot migration in <c>SettingsStore.MigrateInPlace</c>.
-    /// Kept on this type so existing settings.json files deserialize
-    /// without data loss; no live code reads it past migration.
-    /// Default is null so <see cref="JsonIgnoreCondition.WhenWritingNull"/>
-    /// keeps the field out of every subsequent save.
-    /// </summary>
-    public List<string>? AdditionalDirectories { get; set; }
 }
 
 /// <summary>
@@ -104,10 +93,10 @@ public class GeneralSettings
 /// </summary>
 public class PermissionSettings
 {
-    /// <summary>Tools pre-approved regardless of permission mode.</summary>
+    /// <summary>Tools pre-approved — no approval prompt before they run.</summary>
     public List<string> AllowedTools { get; set; } = new List<string>();
 
-    /// <summary>Tools always refused regardless of permission mode.</summary>
+    /// <summary>Tools always refused — no approval prompt, never run.</summary>
     public List<string> DisallowedTools { get; set; } = new List<string>();
 
     /// <summary>
