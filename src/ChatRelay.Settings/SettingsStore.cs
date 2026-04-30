@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -73,32 +72,7 @@ namespace ChatRelay.Settings
                     _cache = new ExtensionSettings();
                 }
 
-                MigrateInPlace(_cache);
                 return _cache;
-            }
-        }
-
-        // One-shot migrations for users with settings files written by
-        // earlier versions. Runs on every load but is idempotent —
-        // a file that's already up-to-date sees no changes. The data
-        // moves in-memory only; the next Save writes the current
-        // (migrated) shape.
-        private static void MigrateInPlace(ExtensionSettings s)
-        {
-            if (s?.General == null || s.Permissions == null) return;
-
-            // AdditionalDirectories moved from General to Permissions. If
-            // someone had paths in the old location and the new one is
-            // still empty, hoist them over.
-            var legacy = s.General.AdditionalDirectories;
-            if (legacy != null && legacy.Count > 0
-                && (s.Permissions.AdditionalDirectories == null
-                    || s.Permissions.AdditionalDirectories.Count == 0))
-            {
-                s.Permissions.AdditionalDirectories = new List<string>(legacy);
-                s.General.AdditionalDirectories = new List<string>();
-                ExtensionLogger.Info("settings",
-                    $"Migrated {legacy.Count} AdditionalDirectories entries from general → permissions");
             }
         }
 

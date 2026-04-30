@@ -66,7 +66,7 @@ public class ClaudeCliService
     /// <summary>
     /// Extra directories to grant tool access to via <c>--add-dir</c>. One
     /// flag per entry. Null/empty omits the flag. Typically populated from
-    /// <c>GeneralSettings.AdditionalDirectories</c>.
+    /// <c>PermissionSettings.AdditionalDirectories</c>.
     /// </summary>
     public IReadOnlyList<string>? AdditionalDirectories { get; set; }
 
