@@ -6,7 +6,7 @@
     <Description xml:space="preserve">Chat with Claude inside Visual Studio — and any other AI backend you have installed. ChatRelay auto-detects Claude CLI (subscription login), the Anthropic API, and local Ollama, then groups every available model under one dropdown in a dockable tool window. Right-click any editor selection or Solution Explorer file to pin it as a reference in the next message. Configure MCP servers globally or per-solution — tools work across every backend.</Description>
     <License>LICENSE</License>
     <GettingStartedGuide>https://github.com/Kyranio/ChatRelay</GettingStartedGuide>
-    <ReleaseNotes>https://github.com/Kyranio/ChatRelay/blob/main/CHANGELOG.md</ReleaseNotes>
+    <ReleaseNotes>https://github.com/Kyranio/ChatRelay/blob/master/CHANGELOG.md</ReleaseNotes>
     <Tags>chat, ai, llm, claude, anthropic, ollama, mcp, model-context-protocol, copilot, assistant</Tags>
   </Metadata>
   <Installation>
