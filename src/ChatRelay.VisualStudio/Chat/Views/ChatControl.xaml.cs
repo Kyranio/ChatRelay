@@ -685,9 +685,9 @@ public partial class ChatControl : UserControl
         var status = new TextBlock { FontSize = 11, Margin = new Thickness(0, 6, 0, 0), Visibility = Visibility.Collapsed };
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 8, 0, 0) };
 
-        var deny = PermissionButton("Deny");
-        var once = PermissionButton("Allow once");
-        var always = PermissionButton("Allow always");
+        var deny = PermissionButton("Deny", "PermissionDenyButtonStyle");
+        var once = PermissionButton("Allow once", "PermissionAllowOnceButtonStyle");
+        var always = PermissionButton("Allow always", "PermissionAllowAlwaysButtonStyle");
         buttons.Children.Add(deny);
         buttons.Children.Add(once);
         buttons.Children.Add(always);
@@ -721,12 +721,10 @@ public partial class ChatControl : UserControl
         HistoryScroll.ScrollToEnd();
     }
 
-    static Button PermissionButton(string label) => new()
+    Button PermissionButton(string label, string styleKey) => new()
     {
         Content = label,
-        Padding = new Thickness(10, 4, 10, 4),
-        Margin = new Thickness(0, 0, 6, 0),
-        Cursor = Cursors.Hand,
+        Style = (Style)FindResource(styleKey),
     };
 
     static string PrettyJson(string json)

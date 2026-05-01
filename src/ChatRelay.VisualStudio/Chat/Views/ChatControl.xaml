@@ -216,6 +216,68 @@
                     </Setter.Value>
                 </Setter>
             </Style>
+
+            <!-- Permission-bubble action buttons. Theme-aware base + three
+                 derived styles that add an accent border to telegraph
+                 intent: red for Deny (destructive), neutral for Allow once,
+                 brand turquoise for Allow always (the "stickier" decision).
+                 Idle / hover / pressed all pull from EnvironmentColors so
+                 the bubble blends with whichever VS theme is active. -->
+            <Style x:Key="PermissionButtonBaseStyle" TargetType="Button">
+                <Setter Property="Padding" Value="10,4"/>
+                <Setter Property="Margin" Value="0,0,6,0"/>
+                <Setter Property="MinWidth" Value="84"/>
+                <Setter Property="FontSize" Value="11"/>
+                <Setter Property="Cursor" Value="Hand"/>
+                <Setter Property="Foreground"
+                        Value="{DynamicResource {x:Static vs:EnvironmentColors.ToolWindowTextBrushKey}}"/>
+                <Setter Property="Background"
+                        Value="{DynamicResource {x:Static vs:EnvironmentColors.ComboBoxBackgroundBrushKey}}"/>
+                <Setter Property="BorderBrush"
+                        Value="{DynamicResource {x:Static vs:EnvironmentColors.ComboBoxBorderBrushKey}}"/>
+                <Setter Property="BorderThickness" Value="1"/>
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="Button">
+                            <Border x:Name="Bd"
+                                    Background="{TemplateBinding Background}"
+                                    BorderBrush="{TemplateBinding BorderBrush}"
+                                    BorderThickness="{TemplateBinding BorderThickness}"
+                                    CornerRadius="3"
+                                    Padding="{TemplateBinding Padding}">
+                                <ContentPresenter HorizontalAlignment="Center"
+                                                  VerticalAlignment="Center"/>
+                            </Border>
+                            <ControlTemplate.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter TargetName="Bd" Property="Background"
+                                            Value="{DynamicResource {x:Static vs:EnvironmentColors.CommandBarMouseOverBackgroundGradientBrushKey}}"/>
+                                </Trigger>
+                                <Trigger Property="IsPressed" Value="True">
+                                    <Setter TargetName="Bd" Property="Background"
+                                            Value="{DynamicResource {x:Static vs:EnvironmentColors.CommandBarSelectedBrushKey}}"/>
+                                </Trigger>
+                                <Trigger Property="IsEnabled" Value="False">
+                                    <Setter TargetName="Bd" Property="Opacity" Value="0.5"/>
+                                </Trigger>
+                            </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
+            </Style>
+
+            <Style x:Key="PermissionDenyButtonStyle" TargetType="Button"
+                   BasedOn="{StaticResource PermissionButtonBaseStyle}">
+                <Setter Property="BorderBrush" Value="#C0392B"/>
+            </Style>
+
+            <Style x:Key="PermissionAllowOnceButtonStyle" TargetType="Button"
+                   BasedOn="{StaticResource PermissionButtonBaseStyle}"/>
+
+            <Style x:Key="PermissionAllowAlwaysButtonStyle" TargetType="Button"
+                   BasedOn="{StaticResource PermissionButtonBaseStyle}">
+                <Setter Property="BorderBrush" Value="#40E0D0"/>
+            </Style>
         </ResourceDictionary>
     </UserControl.Resources>
 
