@@ -1,0 +1,25 @@
+# Required status check on PRs into master. Passes only when the PR's
+# head branch is `dev`, so feature work flows feature-branch → dev →
+# master rather than feature-branch → master directly. Without this
+# check, GitHub's "require pull request" branch-protection rule still
+# accepts PRs from any source branch.
+name: Enforce PR source branch
+
+on:
+  pull_request:
+    branches: [master]
+
+jobs:
+  check-source:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject non-dev sources
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          if [ "$HEAD_REF" != "dev" ]; then
+            echo "::error::PRs into master must come from the 'dev' branch (saw '$HEAD_REF')."
+            echo "Open the PR against 'dev' instead, then promote dev → master with its own PR."
+            exit 1
+          fi
+          echo "Source branch is 'dev' — OK."
