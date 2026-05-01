@@ -12,9 +12,15 @@ public sealed class HostFixture : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
+        // AppContext.BaseDirectory is the test DLL's output dir, which sits at
+        // .../ChatRelay.IntegrationTests/bin/<Config>/<TFM>/. Pull <Config> out
+        // so a Release test run hits the Release host build instead of falling
+        // back to a stale Debug DLL — that's what bit CI when the workflow ran
+        // -c Release against the hard-coded "Debug" path.
+        var config = new DirectoryInfo(AppContext.BaseDirectory).Parent?.Name ?? "Debug";
         var hostDll = Path.GetFullPath(Path.Combine(
             AppContext.BaseDirectory, "..", "..", "..", "..",
-            "ChatRelay.Host", "bin", "Debug", "net10.0", "ChatRelay.Host.dll"));
+            "ChatRelay.Host", "bin", config, "net10.0", "ChatRelay.Host.dll"));
         Assert.True(File.Exists(hostDll), "Host DLL not found: " + hostDll);
 
         var psi = new ProcessStartInfo("dotnet", $"\"{hostDll}\"")
