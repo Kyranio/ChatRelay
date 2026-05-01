@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-05-01
+
+First versioned release with shipped artifact. Folds in everything
+that had been accumulating under `[Unreleased]` since `0.1.0` was
+written (architecture rewire, chat UX, MCP HTTP/SSE transport, etc.)
+plus two new bug fixes called out below.
+
+### Fixed
+- **Permission-bubble buttons follow the VS theme.** Deny / Allow once
+  / Allow always were plain WPF `Button`s with only padding and cursor
+  set, falling back to Win32-default gray chrome that ignored Dark /
+  Light / Blue. Now use themed brushes (`EnvironmentColors`) with
+  red / neutral / brand-turquoise accent borders.
+- **Claude CLI sessions resume across turns.** `BuildRequest` was
+  reading the session id from a per-turn variable that hadn't been
+  populated yet, so every send went out without `--resume` and Claude
+  lost context after the first message. Now reads the persisted id
+  from `SessionStore` directly. Pre-existing bug, not a regression.
+
 ### Architecture
 - **Wire DTOs** centralised in `ChatRelay.Contracts` (netstandard2.0) —
   one assembly referenced by both the net48 shell and the net10 host;
@@ -218,5 +237,6 @@ Initial public release.
   results baked in, but the intermediate tool uses are not
   shown as bubbles.
 
-[Unreleased]: https://github.com/Kyranio/ChatRelay/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Kyranio/ChatRelay/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/Kyranio/ChatRelay/releases/tag/v0.1.1
 [0.1.0]: https://github.com/Kyranio/ChatRelay/releases/tag/v0.1.0
