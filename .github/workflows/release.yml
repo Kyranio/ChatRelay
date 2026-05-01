@@ -1,0 +1,93 @@
+# Cuts a GitHub Release with the built VSIX whenever the version in
+# source.extension.vsixmanifest moves to a value that doesn't already
+# have a v<version> tag on origin. Same-version pushes are no-ops, so
+# day-to-day commits don't clutter the releases page — only an explicit
+# version bump triggers a publish.
+name: Release
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed to create tags and releases
+
+jobs:
+  release:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so the tag-existence probe sees everything
+
+      - name: Read version from vsixmanifest
+        id: version
+        shell: pwsh
+        run: |
+          [xml]$xml = Get-Content src/ChatRelay.VisualStudio/source.extension.vsixmanifest
+          $version = $xml.PackageManifest.Metadata.Identity.Version
+          if (-not $version) { throw "Could not read Version from vsixmanifest" }
+          Write-Host "Manifest version: $version"
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "tag=v$version"    | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Skip if tag already exists on origin
+        id: tag_check
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.version.outputs.tag }}"
+          $existing = git ls-remote --tags origin "refs/tags/$tag"
+          if ($existing) {
+            Write-Host "Tag $tag already exists on origin — nothing to release."
+            "skip=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          } else {
+            Write-Host "Tag $tag does not exist yet — proceeding with release."
+            "skip=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          }
+
+      - name: Setup .NET 10
+        if: steps.tag_check.outputs.skip == 'false'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Setup MSBuild
+        if: steps.tag_check.outputs.skip == 'false'
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Restore + build (Release)
+        if: steps.tag_check.outputs.skip == 'false'
+        shell: pwsh
+        run: |
+          MSBuild.exe ChatRelay.slnx /t:Restore /p:Configuration=Release /v:minimal
+          MSBuild.exe ChatRelay.slnx /t:Rebuild  /p:Configuration=Release /v:minimal
+
+      - name: Integration tests
+        if: steps.tag_check.outputs.skip == 'false'
+        shell: pwsh
+        run: dotnet test src/ChatRelay.IntegrationTests/ChatRelay.IntegrationTests.csproj -c Release --no-build
+
+      - name: Locate VSIX
+        if: steps.tag_check.outputs.skip == 'false'
+        id: vsix
+        shell: pwsh
+        run: |
+          $vsix = "src/ChatRelay.VisualStudio/bin/Release/net48/ChatRelay.vsix"
+          if (-not (Test-Path $vsix)) { throw "VSIX not found at $vsix" }
+          $info = Get-Item $vsix
+          Write-Host "VSIX: $($info.FullName) ($([math]::Round($info.Length / 1MB, 1)) MB)"
+          "path=$vsix" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Create release + upload VSIX
+        if: steps.tag_check.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" `
+            "${{ steps.vsix.outputs.path }}" `
+            --title "ChatRelay ${{ steps.version.outputs.version }}" `
+            --target master `
+            --generate-notes
