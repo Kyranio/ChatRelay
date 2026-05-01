@@ -1,0 +1,36 @@
+# Build + integration tests on every PR targeting dev or master. Runs
+# the same Release rebuild + test sequence as release.yml so failures
+# show up at PR review time instead of post-merge — this is what we
+# missed on the v0.1.1 promotion, where the integration-tests path
+# blew up only after the merge button had been pressed.
+#
+# Once this workflow has run once, add "build-and-test" to the required
+# status checks on master and dev branch protection so a red CI run
+# blocks merge.
+name: CI
+
+on:
+  pull_request:
+    branches: [dev, master]
+
+jobs:
+  build-and-test:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Restore + build (Release)
+        shell: pwsh
+        run: |
+          MSBuild.exe ChatRelay.slnx /t:Restore /p:Configuration=Release /v:minimal
+          MSBuild.exe ChatRelay.slnx /t:Rebuild  /p:Configuration=Release /v:minimal
+
+      - name: Integration tests
+        shell: pwsh
+        run: dotnet test src/ChatRelay.IntegrationTests/ChatRelay.IntegrationTests.csproj -c Release --no-build
