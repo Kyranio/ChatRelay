@@ -1,8 +1,10 @@
 # Required status check on PRs into master. Passes only when the PR's
-# head branch is `dev`, so feature work flows feature-branch → dev →
-# master rather than feature-branch → master directly. Without this
-# check, GitHub's "require pull request" branch-protection rule still
-# accepts PRs from any source branch.
+# head is the upstream repo's own `dev` branch, so feature work flows
+# feature-branch → dev → master rather than feature-branch → master
+# directly. The head_repo check is the part that defeats forks: without
+# it, a contributor could name a branch `dev` on their fork and PR it
+# straight into upstream:master. With it, only upstream:dev can ever
+# satisfy the rule.
 name: Enforce PR source branch
 
 on:
@@ -16,10 +18,17 @@ jobs:
       - name: Reject non-dev sources
         env:
           HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          UPSTREAM_REPO: ${{ github.repository }}
         run: |
+          if [ "$HEAD_REPO" != "$UPSTREAM_REPO" ]; then
+            echo "::error::PRs into master must come from this repository's own 'dev' branch (saw fork '$HEAD_REPO')."
+            echo "Forks should target the 'dev' branch instead — only upstream:dev → upstream:master is allowed."
+            exit 1
+          fi
           if [ "$HEAD_REF" != "dev" ]; then
             echo "::error::PRs into master must come from the 'dev' branch (saw '$HEAD_REF')."
             echo "Open the PR against 'dev' instead, then promote dev → master with its own PR."
             exit 1
           fi
-          echo "Source branch is 'dev' — OK."
+          echo "Source is upstream:dev — OK."
