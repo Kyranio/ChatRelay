@@ -240,7 +240,7 @@ public sealed class HostService
         var cancelled = false;
         try
         {
-            await adapter.SendPromptAsync(BuildRequest(p, assignedSession, adapter), cts.Token);
+            await adapter.SendPromptAsync(BuildRequest(p, adapter), cts.Token);
             PersistTurn(p, finalText.ToString(), finalThinking.ToString(), finalUsage, assignedSession, adapter.Id, finalModel);
         }
         catch (OperationCanceledException) { cancelled = true; }
@@ -397,7 +397,7 @@ public sealed class HostService
             _ = Rpc?.NotifyAsync("onMcpServerChanged", ToServerSummary(h));
     }
 
-    AiRequest BuildRequest(SendPromptParams p, string? priorSessionId, IAiAdapter adapter)
+    AiRequest BuildRequest(SendPromptParams p, IAiAdapter adapter)
     {
         var prompt = new StringBuilder();
         if (p.References is not null)
@@ -413,13 +413,23 @@ public sealed class HostService
         }
         prompt.Append(p.Text);
 
-        var history = LoadHistory(p.SessionId);
+        // Pull the persisted session in one shot — both stateful adapters
+        // (Claude CLI, via SessionId/--resume) and stateless ones (ClaudeApi,
+        // Ollama; via History) read from the same source of truth. Reading
+        // session id from disk per turn is what makes server-side resume
+        // actually work; previously this came from a per-turn variable that
+        // hadn't been populated yet by the time BuildRequest was called.
+        var sessions = SessionStore.Load(_workspace);
+        PersistedSession? persisted = null;
+        if (int.TryParse(p.SessionId, out var idx) && idx >= 0 && idx < sessions.Count)
+            persisted = sessions[idx];
+
         var req = new AiRequest
         {
             Prompt = prompt.ToString(),
-            History = history,
+            History = HistoryFor(persisted),
             Model = p.ModelId,
-            SessionId = priorSessionId,
+            SessionId = persisted?.SessionId,
             Mcp = McpRuntimeHost.Instance,
         };
 
@@ -468,12 +478,10 @@ public sealed class HostService
         return System.IO.File.Exists(candidate) ? candidate : null;
     }
 
-    IReadOnlyList<AiTurn> LoadHistory(string sessionId)
+    static IReadOnlyList<AiTurn> HistoryFor(PersistedSession? s)
     {
-        var sessions = SessionStore.Load(_workspace);
-        if (!int.TryParse(sessionId, out var i) || i < 0 || i >= sessions.Count)
-            return Array.Empty<AiTurn>();
-        return sessions[i].Messages
+        if (s is null) return Array.Empty<AiTurn>();
+        return s.Messages
             .Where(m => m.Kind is BubbleKind.User or BubbleKind.Assistant)
             .Select(m => new AiTurn
             {
