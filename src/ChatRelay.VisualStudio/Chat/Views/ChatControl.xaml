@@ -278,6 +278,43 @@
                    BasedOn="{StaticResource PermissionButtonBaseStyle}">
                 <Setter Property="BorderBrush" Value="#40E0D0"/>
             </Style>
+
+            <!-- Tiny per-row icon button for the changes-list rows. Smaller
+                 than the IconButton style above (no padding, fixed 22x18)
+                 so accept / undo / redo glyphs can float to the left of
+                 the file path without crowding it. Theme-bound idle +
+                 hover; transparent when not hovered to keep the row
+                 visually quiet. -->
+            <Style x:Key="ChangeRowButtonStyle" TargetType="Button">
+                <Setter Property="Background" Value="Transparent"/>
+                <Setter Property="BorderThickness" Value="0"/>
+                <Setter Property="Cursor" Value="Hand"/>
+                <Setter Property="Width" Value="22"/>
+                <Setter Property="Height" Value="18"/>
+                <Setter Property="Margin" Value="0,0,2,0"/>
+                <Setter Property="Padding" Value="0"/>
+                <Setter Property="FontSize" Value="13"/>
+                <Setter Property="Foreground"
+                        Value="{DynamicResource {x:Static vs:EnvironmentColors.ToolWindowTextBrushKey}}"/>
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="Button">
+                            <Border x:Name="Bd"
+                                    Background="{TemplateBinding Background}"
+                                    CornerRadius="3">
+                                <ContentPresenter HorizontalAlignment="Center"
+                                                  VerticalAlignment="Center"/>
+                            </Border>
+                            <ControlTemplate.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter TargetName="Bd" Property="Background"
+                                            Value="{DynamicResource {x:Static vs:EnvironmentColors.CommandBarMouseOverBackgroundGradientBrushKey}}"/>
+                                </Trigger>
+                            </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
+            </Style>
         </ResourceDictionary>
     </UserControl.Resources>
 
@@ -290,6 +327,8 @@
                 <!-- history           -->
                 <RowDefinition Height="Auto"/>
                 <!-- references        -->
+                <RowDefinition Height="Auto"/>
+                <!-- proposed changes  -->
                 <RowDefinition Height="Auto"/>
                 <!-- input             -->
                 <RowDefinition Height="Auto"/>
@@ -385,10 +424,43 @@
                 <StackPanel x:Name="ReferencesList"/>
             </Expander>
 
+            <!-- Proposed changes — files the model has just edited during
+                 this session. Mirrors the references list in look and feel
+                 but each row floats accept / undo (or redo for denied) on
+                 the left. The main list is always visible when populated;
+                 the Denied section below is collapsible (default closed)
+                 and hides itself when there are no denials.
+                 Both panels are kept inside one outer container so the
+                 row spacing in the chat layout is preserved when only one
+                 of the two is visible. -->
+            <StackPanel Grid.Row="3" Margin="4,0">
+                <StackPanel x:Name="ChangesContainer"
+                            Visibility="Collapsed">
+                    <TextBlock Text="Changes"
+                               FontSize="11"
+                               FontWeight="SemiBold"
+                               Opacity="0.55"
+                               Margin="2,0,0,2"
+                               Foreground="{DynamicResource {x:Static vs:EnvironmentColors.ToolWindowTextBrushKey}}"/>
+                    <StackPanel x:Name="ChangesList"/>
+                </StackPanel>
+                <Expander x:Name="DenialsExpander"
+                          Header="Denied / undone changes"
+                          IsExpanded="False"
+                          Visibility="Collapsed"
+                          BorderThickness="0"
+                          Background="Transparent"
+                          FontSize="11"
+                          Margin="0,2,0,0"
+                          Foreground="{DynamicResource {x:Static vs:EnvironmentColors.ToolWindowTextBrushKey}}">
+                    <StackPanel x:Name="DenialsList"/>
+                </Expander>
+            </StackPanel>
+
             <!-- Input area: one rounded container. The TextBox fills the whole
              width with a transparent background; the orange send button floats
              inside, docked to the bottom-right. -->
-            <Border Grid.Row="3" Margin="4"
+            <Border Grid.Row="4" Margin="4"
                 CornerRadius="8"
                 BorderThickness="1"
                 MinHeight="100" MaxHeight="240"
@@ -526,7 +598,7 @@
             <!-- Session usage totals. Populated in code-behind after each
              UsageUpdate event; collapsed while there's nothing to show. -->
             <TextBlock x:Name="UsageStatusBar"
-                   Grid.Row="4"
+                   Grid.Row="5"
                    Margin="8,2,8,4"
                    FontSize="10"
                    Opacity="0.6"
