@@ -33,8 +33,41 @@ public sealed class ChangeTracker
     /// paths. Updated by <c>setWorkspace</c> on the host. Null = no
     /// workspace, in which case nothing is tracked (we don't want to
     /// follow writes outside any project).
+    ///
+    /// <para>
+    /// Setting this also (re)creates the file-system watcher so external
+    /// edits inside the new workspace can invalidate stale denial entries.
+    /// Setting to null disposes the watcher.
+    /// </para>
     /// </summary>
-    public string? WorkspaceRoot { get; set; }
+    public string? WorkspaceRoot
+    {
+        get => _workspaceRoot;
+        set
+        {
+            if (string.Equals(_workspaceRoot, value, StringComparison.OrdinalIgnoreCase)) return;
+            _workspaceRoot = value;
+            RebuildWatcher();
+        }
+    }
+    string? _workspaceRoot;
+    WorkspaceWatcher? _watcher;
+
+    void RebuildWatcher()
+    {
+        try { _watcher?.Dispose(); } catch { }
+        _watcher = null;
+        if (string.IsNullOrEmpty(_workspaceRoot)) return;
+        if (!Directory.Exists(_workspaceRoot)) return;
+        try
+        {
+            _watcher = new WorkspaceWatcher(_workspaceRoot!, OnExternalFileChange);
+        }
+        catch (Exception ex)
+        {
+            ExtensionLogger.Warn("changes", $"Failed to start workspace watcher: {ex.Message}");
+        }
+    }
 
     public SessionChangesSnapshot Snapshot(string sessionId)
     {
@@ -157,17 +190,20 @@ public sealed class ChangeTracker
         {
             if (!s.Files.TryGetValue(NormalisePath(filePath), out var f)) return false;
             var record = f.Denied.FirstOrDefault(d => d.Id == denialId);
-            if (record is null || record.IsStale) return false;
+            if (record is null) return false;
 
             // Refuse if the file's drifted from the post-deny state. The
-            // FileSystemWatcher path also marks records stale on external
-            // edits; this is a belt-and-braces check.
+            // workspace watcher catches most of these proactively, but this
+            // belt-and-braces re-read defends against the watcher missing
+            // an event (buffer overflow, unsupported file system, …).
             string current;
             try { current = File.ReadAllText(f.AbsolutePath); }
             catch { return false; }
             if (!string.Equals(current, record.DiskContentAtDeny, StringComparison.Ordinal))
             {
-                record.IsStale = true;
+                // Drop the now-meaningless entry. Spec: "the removed changes
+                // will be cleared from the session file."
+                f.Denied.Remove(record);
                 changed = true;
                 goto done;
             }
@@ -322,6 +358,64 @@ public sealed class ChangeTracker
         {
             ExtensionLogger.Warn("changes", $"Post-write read failed for {absolute}: {ex.Message}");
         }
+        // Subsequent model edit invalidates any prior denial whose post-deny
+        // disk state no longer matches reality. Per spec: "Once the file is
+        // modified ... the removed changes will be cleared from the session
+        // file." The same rule applies whether the modification came from
+        // the model (this path) or the user (OnExternalFileChange below).
+        f.Denied.RemoveAll(d => !string.Equals(d.DiskContentAtDeny, f.LastApplied, StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Workspace watcher entry point. Runs whenever <see cref="WorkspaceWatcher"/>
+    /// reports a file change inside the watched root, on a background thread.
+    /// Drops denial entries whose post-deny disk state has drifted.
+    ///
+    /// <para>
+    /// Skips if disk content matches a known clean state (<c>LastApplied</c>
+    /// or <c>Baseline</c>) — that's almost certainly our own write echoing
+    /// back through the watcher and shouldn't invalidate anything.
+    /// </para>
+    /// </summary>
+    void OnExternalFileChange(string absolutePath)
+    {
+        string content;
+        try
+        {
+            if (!File.Exists(absolutePath)) content = string.Empty;
+            else content = File.ReadAllText(absolutePath);
+        }
+        catch
+        {
+            // File locked / mid-write — ignore. The next event for this
+            // path (if any) will retry; if not, the user's next deliberate
+            // action will resolve via the disk re-read.
+            return;
+        }
+
+        var key = NormalisePath(absolutePath);
+        var changedSessions = new List<string>();
+        foreach (var kv in _sessions)
+        {
+            var session = kv.Value;
+            lock (session.Sync)
+            {
+                if (!session.Files.TryGetValue(key, out var f)) continue;
+
+                // Disk matches a clean state we know about → echo of our own
+                // write or a no-op (e.g. tool that touched but didn't modify).
+                // Don't disturb any denial entries.
+                if (string.Equals(content, f.LastApplied, StringComparison.Ordinal)) continue;
+                if (string.Equals(content, f.Baseline, StringComparison.Ordinal)) continue;
+
+                // External modification. Drop denial records whose post-deny
+                // expected state doesn't match the new disk content.
+                var removed = f.Denied.RemoveAll(
+                    d => !string.Equals(d.DiskContentAtDeny, content, StringComparison.Ordinal));
+                if (removed > 0) changedSessions.Add(kv.Key);
+            }
+        }
+        foreach (var sid in changedSessions) FireNotify(sid);
     }
 
     string MakeDisplay(string absolute)
@@ -362,7 +456,12 @@ public sealed class ChangeTracker
                             LinesAdded: d.LinesAdded,
                             LinesRemoved: d.LinesRemoved,
                             DeniedAt: d.DeniedAt,
-                            CanRedo: !d.IsStale))
+                            // Stale denials are dropped from f.Denied
+                            // outright (in OnExternalFileChange / Update-
+                            // LastApplied / RedoDenial) — by the time we
+                            // hit this projection, anything still here is
+                            // redoable. Wire field kept for forward-compat.
+                            CanRedo: true))
                         .ToList()));
             }
         }

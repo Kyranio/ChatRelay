@@ -60,17 +60,18 @@ public sealed class FileTracker
 
 /// <summary>
 /// One deny entry. Holds the content we'd write back on redo plus the disk
-/// content right after the deny. If the disk content drifts from
-/// <see cref="DiskContentAtDeny"/> the entry is no longer redo-able and
-/// <see cref="IsStale"/> becomes true.
+/// content right after the deny. The tracker drops the record outright the
+/// moment <c>DiskContentAtDeny</c> stops matching the file's actual content
+/// (next model edit, user edit caught by the watcher, or a redo race) — so
+/// any entry surviving in <see cref="FileTracker.Denied"/> is, by
+/// construction, still redoable.
 /// </summary>
 public sealed class DeniedChangeRecord
 {
     public required string Id { get; init; }                // stable id for the wire
     public required DateTime DeniedAt { get; init; }
     public required string ContentToReapply { get; init; }  // = LastApplied at deny time
-    public required string DiskContentAtDeny { get; init; } // = Accepted at deny time (what we wrote)
+    public required string DiskContentAtDeny { get; init; } // = Baseline at deny time (what we wrote)
     public required int LinesAdded { get; init; }           // diff(DiskContentAtDeny, ContentToReapply)
     public required int LinesRemoved { get; init; }
-    public bool IsStale { get; set; }
 }
