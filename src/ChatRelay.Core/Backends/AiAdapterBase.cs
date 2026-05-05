@@ -20,6 +20,7 @@ namespace ChatRelay.Backends
 
         public event EventHandler<AiMessageEvent>? MessageReceived;
         public event EventHandler<AiErrorEvent>? ErrorReceived;
+        public event EventHandler<ToolCallObservedEvent>? ToolCallObserved;
 
         public abstract Task<bool> IsAvailableAsync(CancellationToken ct);
         public abstract Task<IReadOnlyList<AiModel>> ListModelsAsync(CancellationToken ct);
@@ -69,6 +70,18 @@ namespace ChatRelay.Backends
         {
             if (string.IsNullOrEmpty(message)) return;
             ErrorReceived?.Invoke(this, new AiErrorEvent { Message = message });
+        }
+
+        /// <summary>Fire a tool-call observation. No-op when nobody's listening.</summary>
+        protected void RaiseToolCall(string toolName, string inputJson, ToolCallPhase phase)
+        {
+            if (string.IsNullOrEmpty(toolName)) return;
+            ToolCallObserved?.Invoke(this, new ToolCallObservedEvent
+            {
+                ToolName = toolName,
+                InputJson = inputJson ?? string.Empty,
+                Phase = phase,
+            });
         }
     }
 }

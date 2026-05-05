@@ -80,3 +80,50 @@ public record RemoveMcpFileParams(string Path);
 
 public record PermissionRequestEvent(string RequestId, string SessionId, string ToolName, string InputJson);
 public record RespondPermissionParams(string RequestId, string Decision, bool Remember);
+
+// Change tracking ------------------------------------------------------------
+//
+// Volatile, in-memory only on the host. Per-session. Cleared when the host
+// process dies (i.e. when VS closes). Tracks files the model has written
+// during this VS session so the user can review and accept / deny each
+// proposal independently. Edits are always already on disk — the tracker
+// just records what changed and how to undo.
+//
+// "open" → user hasn't decided. Shown in the main changes list.
+// "accepted" → user kept the change. Stays in main list, accept button hidden.
+// Denied entries live on a parallel list per file (the collapsible section).
+//
+// One row per file, aggregating every edit the model made to it during the
+// session — the line counts are baseline-vs-current diff, not per-edit deltas.
+
+public record SessionChangesSnapshot(
+    string SessionId,
+    IReadOnlyList<ChangeProposal> Proposals,
+    IReadOnlyList<DenialGroup> Denials);
+
+public record ChangeProposal(
+    string FilePath,
+    string AbsolutePath,
+    int LinesAdded,
+    int LinesRemoved,
+    string State);              // "open" | "accepted"
+
+public record DenialGroup(
+    string FilePath,
+    string AbsolutePath,
+    IReadOnlyList<DeniedChangeSummary> Entries);
+
+public record DeniedChangeSummary(
+    string Id,
+    int LinesAdded,
+    int LinesRemoved,
+    DateTime DeniedAt,
+    bool CanRedo);              // false once the file has been modified externally
+
+public record ListChangesParams(string SessionId);
+public record AcceptChangeParams(string SessionId, string FilePath);
+public record DenyChangeParams(string SessionId, string FilePath);
+public record RedoDeniedChangeParams(string SessionId, string FilePath, string DenialId);
+public record BulkChangesParams(string SessionId);
+
+public record ChangesUpdatedEvent(SessionChangesSnapshot Snapshot);

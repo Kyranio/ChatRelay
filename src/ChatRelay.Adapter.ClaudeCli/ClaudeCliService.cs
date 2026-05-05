@@ -216,6 +216,7 @@ public class ClaudeCliService
         return typeEl.GetString() switch
         {
             "assistant" => BuildAssistantEvent(root),
+            "user" => BuildUserEvent(root),
             "result" => new ClaudeEvent
             {
                 Type = ClaudeEventType.Result,
@@ -236,6 +237,33 @@ public class ClaudeCliService
             },
             _ => null
         };
+    }
+
+    // CLI emits a "user" event after every tool execution that carries
+    // tool_result content blocks correlated to prior tool_use ids. We pull
+    // the ids out so the adapter can map back to (ToolName, InputJson) and
+    // signal "tool finished, post-write state is on disk" to the change
+    // tracker. Other content (text echoes from the user role) is ignored.
+    private static ClaudeEvent BuildUserEvent(JsonElement root)
+    {
+        var evt = new ClaudeEvent { Type = ClaudeEventType.User };
+        if (!root.TryGetProperty("message", out var msg)
+            || !msg.TryGetProperty("content", out var content)
+            || content.ValueKind != JsonValueKind.Array)
+            return evt;
+
+        foreach (var block in content.EnumerateArray())
+        {
+            if (!block.TryGetProperty("type", out var t)) continue;
+            if (t.GetString() != "tool_result") continue;
+            evt.ToolResults.Add(new ClaudeToolResult
+            {
+                ToolUseId = block.TryGetProperty("tool_use_id", out var id) && id.ValueKind == JsonValueKind.String
+                    ? id.GetString() ?? string.Empty
+                    : string.Empty
+            });
+        }
+        return evt;
     }
 
     // CLI expects --allowedTools / --disallowedTools as a single comma-separated
@@ -327,6 +355,7 @@ public class ClaudeCliService
         var text = new StringBuilder();
         var thinking = new StringBuilder();
         var typesSeen = new System.Collections.Generic.List<string>();
+        var toolUses = new System.Collections.Generic.List<ClaudeToolUse>();
 
         if (root.TryGetProperty("message", out var msg)
             && msg.TryGetProperty("content", out var content))
@@ -354,6 +383,25 @@ public class ClaudeCliService
                     if (thinking.Length > 0) thinking.Append('\n');
                     thinking.Append("[redacted reasoning — not available]");
                 }
+                else if (kind == "tool_use")
+                {
+                    // Surface every tool invocation the model emits. The
+                    // adapter caches (id → name + input) and forwards as
+                    // ToolCallObservedEvent so the change tracker can
+                    // snapshot pre-write content for file-mutating tools.
+                    toolUses.Add(new ClaudeToolUse
+                    {
+                        Id = block.TryGetProperty("id", out var idEl) && idEl.ValueKind == JsonValueKind.String
+                            ? idEl.GetString() ?? string.Empty
+                            : string.Empty,
+                        Name = block.TryGetProperty("name", out var nameEl) && nameEl.ValueKind == JsonValueKind.String
+                            ? nameEl.GetString() ?? string.Empty
+                            : string.Empty,
+                        InputJson = block.TryGetProperty("input", out var inputEl)
+                            ? inputEl.GetRawText()
+                            : "{}",
+                    });
+                }
             }
         }
 
@@ -365,7 +413,8 @@ public class ClaudeCliService
         {
             Type = ClaudeEventType.AssistantMessage,
             Content = text.ToString(),
-            Thinking = thinking.ToString()
+            Thinking = thinking.ToString(),
+            ToolUses = toolUses,
         };
     }
 }
@@ -378,6 +427,12 @@ public class ClaudeEvent
     /// <summary>Extended-thinking content; populated on AssistantMessage events when the CLI emits thinking blocks.</summary>
     public string Thinking { get; set; } = string.Empty;
 
+    /// <summary>Tool-use blocks observed in an AssistantMessage. Empty when the model only emitted text/thinking.</summary>
+    public List<ClaudeToolUse> ToolUses { get; set; } = new();
+
+    /// <summary>Tool-result blocks observed in a User event — one per completed tool execution.</summary>
+    public List<ClaudeToolResult> ToolResults { get; set; } = new();
+
     // Usage accounting; populated only for Result events that carry a `usage` block.
     public bool HasUsage { get; set; }
     public int InputTokens { get; set; }
@@ -387,9 +442,22 @@ public class ClaudeEvent
     public double? CostUsd { get; set; }
 }
 
+public class ClaudeToolUse
+{
+    public string Id { get; set; } = string.Empty;
+    public string Name { get; set; } = string.Empty;
+    public string InputJson { get; set; } = string.Empty;
+}
+
+public class ClaudeToolResult
+{
+    public string ToolUseId { get; set; } = string.Empty;
+}
+
 public enum ClaudeEventType
 {
     System,
     AssistantMessage,
+    User,
     Result
 }

@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    In-memory volatile change tracker. Per-session, per-file accounting of
+    edits the model has written during this VS session, in a Git-style
+    blob model: Baseline (file content at first observation) → Accepted
+    (baseline + accepted hunks) → LastApplied (current disk content).
+
+    All state is held in memory. The tracker is reset every time the host
+    process starts, which is once per VS launch — closing VS clears
+    everything automatically.
+
+    Wire DTOs (ChangeProposal, DenialGroup, …) live in ChatRelay.Contracts
+    and are produced by the snapshot helper here.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>ChatRelay.Changes</RootNamespace>
+    <AssemblyName>ChatRelay.Changes</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ChatRelay.Contracts\ChatRelay.Contracts.csproj" />
+    <ProjectReference Include="..\ChatRelay.Logging\ChatRelay.Logging.csproj" />
+  </ItemGroup>
+
+</Project>

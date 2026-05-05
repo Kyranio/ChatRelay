@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text;
 using ChatRelay.Backends;
+using ChatRelay.Changes;
 using ChatRelay.Chat;
 using ChatRelay.Mcp;
 using ChatRelay.Permissions;
@@ -17,6 +18,7 @@ public sealed class HostService
 
     readonly AdapterRegistry _registry;
     readonly PermissionBrokerService _broker;
+    readonly ChangeTracker _changes = new();
     readonly ConcurrentDictionary<string, CancellationTokenSource> _inflight = new();
     readonly ConcurrentDictionary<string, TaskCompletionSource<PermissionDecision>> _pendingPermissions = new();
     string? _workspace;
@@ -30,6 +32,10 @@ public sealed class HostService
         _broker = broker;
         _broker.RequestReceived = OnBrokerRequestAsync;
         McpRuntimeHost.Instance.Servers.CollectionChanged += (_, _) => BroadcastServersChanged();
+
+        // Push a fresh snapshot to any listening shell on every state mutation.
+        _changes.Notify = (sessionId, snapshot) =>
+            _ = Rpc?.NotifyAsync("onChangesUpdated", new ChangesUpdatedEvent(snapshot));
     }
 
     // Lifecycle ------------------------------------------------------------
@@ -40,6 +46,7 @@ public sealed class HostService
         if (p.ProtocolVersion != ProtocolVersion)
             throw new LocalRpcException($"Protocol version mismatch: client={p.ProtocolVersion} server={ProtocolVersion}") { ErrorCode = -32001 };
         _workspace = p.WorkspacePath;
+        _changes.WorkspaceRoot = _workspace;
         McpRuntimeHost.Instance.Refresh(_workspace);
         _ = McpRuntimeHost.Instance.EnsureServersStartedAsync(CancellationToken.None);
         await _registry.RefreshAsync(ct);
@@ -53,6 +60,7 @@ public sealed class HostService
     public Task SetWorkspaceAsync(SetWorkspaceParams p)
     {
         _workspace = p.Path;
+        _changes.WorkspaceRoot = _workspace;
         McpRuntimeHost.Instance.Refresh(_workspace);
         _ = McpRuntimeHost.Instance.EnsureServersStartedAsync(CancellationToken.None);
         return Task.CompletedTask;
@@ -234,8 +242,23 @@ public sealed class HostService
         void OnErr(object? _, AiErrorEvent e) =>
             _ = Rpc?.NotifyAsync("onError", new ErrorEvent(p.SessionId, e.Message));
 
+        // Route every observed tool call to the change tracker. The tracker
+        // filters to file-mutating tools and to paths inside the workspace,
+        // so unrelated traffic (Read/Grep/Glob, mcp__*, etc.) is dropped
+        // cheaply. Updates fire onChangesUpdated through ChangeTracker.Notify.
+        void OnTool(object? _, ToolCallObservedEvent e) =>
+            _changes.Observe(p.SessionId, new ToolCallObservation
+            {
+                ToolName = e.ToolName,
+                InputJson = e.InputJson,
+                Phase = e.Phase == ChatRelay.Backends.ToolCallPhase.Requested
+                    ? ChatRelay.Changes.ToolCallPhase.Requested
+                    : ChatRelay.Changes.ToolCallPhase.Completed,
+            });
+
         adapter.MessageReceived += OnMsg;
         adapter.ErrorReceived += OnErr;
+        adapter.ToolCallObserved += OnTool;
 
         var cancelled = false;
         try
@@ -252,6 +275,7 @@ public sealed class HostService
         {
             adapter.MessageReceived -= OnMsg;
             adapter.ErrorReceived -= OnErr;
+            adapter.ToolCallObserved -= OnTool;
             _inflight.TryRemove(p.SessionId, out _);
             await (Rpc?.NotifyAsync("onTurnDone", new TurnDoneParams(p.SessionId, cancelled)) ?? Task.CompletedTask);
         }
@@ -378,6 +402,55 @@ public sealed class HostService
             new PermissionRequestEvent(requestId, SessionId: "", req.ToolName, req.InputJson));
         return tcs.Task;
     }
+
+    // Change tracking ------------------------------------------------------
+    //
+    // All operations are session-scoped. The tracker is volatile in-memory
+    // state — a fresh host process (i.e. a fresh VS launch) starts empty.
+    // Every mutating call here is a thin wrapper around ChangeTracker, which
+    // also fires onChangesUpdated through the Notify hook set in the ctor.
+
+    [JsonRpcMethod("listChanges", UseSingleObjectParameterDeserialization = true)]
+    public SessionChangesSnapshot ListChanges(ListChangesParams p) =>
+        _changes.Snapshot(p.SessionId);
+
+    [JsonRpcMethod("acceptChange", UseSingleObjectParameterDeserialization = true)]
+    public Task AcceptChangeAsync(AcceptChangeParams p)
+    {
+        _changes.Accept(p.SessionId, p.FilePath);
+        return Task.CompletedTask;
+    }
+
+    [JsonRpcMethod("denyChange", UseSingleObjectParameterDeserialization = true)]
+    public Task DenyChangeAsync(DenyChangeParams p)
+    {
+        _changes.Deny(p.SessionId, p.FilePath);
+        return Task.CompletedTask;
+    }
+
+    [JsonRpcMethod("redoDeniedChange", UseSingleObjectParameterDeserialization = true)]
+    public Task RedoDeniedChangeAsync(RedoDeniedChangeParams p)
+    {
+        _changes.RedoDenial(p.SessionId, p.FilePath, p.DenialId);
+        return Task.CompletedTask;
+    }
+
+    [JsonRpcMethod("acceptAllOpenChanges", UseSingleObjectParameterDeserialization = true)]
+    public Task AcceptAllOpenChangesAsync(BulkChangesParams p)
+    {
+        _changes.AcceptAllOpen(p.SessionId);
+        return Task.CompletedTask;
+    }
+
+    [JsonRpcMethod("denyAllOpenChanges", UseSingleObjectParameterDeserialization = true)]
+    public Task DenyAllOpenChangesAsync(BulkChangesParams p)
+    {
+        _changes.DenyAllOpen(p.SessionId);
+        return Task.CompletedTask;
+    }
+
+    [JsonRpcMethod("countOpenChanges", UseSingleObjectParameterDeserialization = true)]
+    public int CountOpenChanges(BulkChangesParams p) => _changes.CountOpen(p.SessionId);
 
     // Helpers --------------------------------------------------------------
 

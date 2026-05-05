@@ -21,6 +21,7 @@
     <ProjectReference Include="..\ChatRelay.Settings\ChatRelay.Settings.csproj" />
     <ProjectReference Include="..\ChatRelay.Sessions\ChatRelay.Sessions.csproj" />
     <ProjectReference Include="..\ChatRelay.Permissions\ChatRelay.Permissions.csproj" />
+    <ProjectReference Include="..\ChatRelay.Changes\ChatRelay.Changes.csproj" />
     <ProjectReference Include="..\ChatRelay.Core\ChatRelay.Core.csproj" />
     <ProjectReference Include="..\ChatRelay.Adapter.ClaudeCli\ChatRelay.Adapter.ClaudeCli.csproj" />
     <ProjectReference Include="..\ChatRelay.Adapter.ClaudeApi\ChatRelay.Adapter.ClaudeApi.csproj" />
