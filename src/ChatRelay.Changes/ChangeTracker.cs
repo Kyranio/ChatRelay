@@ -101,25 +101,37 @@ public sealed class ChangeTracker
         lock (s.Sync)
         {
             if (!s.Files.TryGetValue(NormalisePath(filePath), out var f)) return false;
-            // Nothing to deny if Accepted already matches LastApplied.
-            if (string.Equals(f.Accepted, f.LastApplied, StringComparison.Ordinal)) return false;
+            // Phase 1 semantics: per-file deny means "revert this file to
+            // its session-baseline content" regardless of whether the user
+            // accepted earlier. That makes undo-after-accept work — the
+            // previous comparison (Accepted vs LastApplied) treated an
+            // already-accepted file as "nothing to deny" because Accept
+            // sets them equal, so the user couldn't change their mind.
+            //
+            // Hunk-level deny (per-hunk decision) is the future inline-
+            // editor phase; the FileTracker shape already supports it
+            // without touching this method.
+            if (string.Equals(f.Baseline, f.LastApplied, StringComparison.Ordinal)) return false;
 
             // Capture deny payload BEFORE we mutate disk, so a write failure
-            // doesn't leave the tracker in a half-state.
-            var counts = LineDiff.Compute(f.Accepted, f.LastApplied);
+            // doesn't leave the tracker in a half-state. Counts are vs the
+            // baseline so the denied row shows the complete model-edit set
+            // the user just rolled back, not a stale 0/0 from an earlier
+            // accept.
+            var counts = LineDiff.Compute(f.Baseline, f.LastApplied);
             var record = new DeniedChangeRecord
             {
                 Id = Guid.NewGuid().ToString("N"),
                 DeniedAt = DateTime.UtcNow,
                 ContentToReapply = f.LastApplied,
-                DiskContentAtDeny = f.Accepted,
+                DiskContentAtDeny = f.Baseline,
                 LinesAdded = counts.Added,
                 LinesRemoved = counts.Removed,
             };
 
             try
             {
-                File.WriteAllText(f.AbsolutePath, f.Accepted);
+                File.WriteAllText(f.AbsolutePath, f.Baseline);
             }
             catch (Exception ex)
             {
@@ -127,7 +139,8 @@ public sealed class ChangeTracker
                 return false;
             }
 
-            f.LastApplied = f.Accepted;
+            f.LastApplied = f.Baseline;
+            f.Accepted = f.Baseline;     // reset; may previously have equalled the old LastApplied
             f.IsAccepted = false;
             f.Denied.Add(record);
             changed = true;
