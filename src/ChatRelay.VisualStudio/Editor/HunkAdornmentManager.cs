@@ -44,7 +44,14 @@ sealed class HunkAdornmentManager
     readonly IWpfTextView _view;
     readonly string? _filePath;
     readonly EditorChangesService _service;
+    // Background layer (below Text): turquoise highlight + accepted marker
+    // bar. Overlay layer (above Text): ghost expander + accept/reject buttons.
+    // Splitting the two means the editor's source code text stays the topmost
+    // *visible* content for the highlight, while the interactive controls
+    // anchored below the hunk's lines aren't obscured by the editor's own
+    // text painted in those rows.
     readonly IAdornmentLayer? _layer;
+    readonly IAdornmentLayer? _overlay;
 
     // Last hunk list we received from the service, kept so we can re-render
     // on LayoutChanged without re-querying. Empty list while we have nothing
@@ -59,11 +66,13 @@ sealed class HunkAdornmentManager
         try
         {
             _layer = view.GetAdornmentLayer(HunkAdornmentLayerDefinition.LayerName);
+            _overlay = view.GetAdornmentLayer(HunkAdornmentLayerDefinition.OverlayLayerName);
         }
         catch (Exception ex)
         {
             Debug.WriteLine($"[ChatRelay.editor] Failed to acquire adornment layer: {ex.Message}");
             _layer = null;
+            _overlay = null;
         }
 
         if (_filePath is null) return;
@@ -102,6 +111,7 @@ sealed class HunkAdornmentManager
     {
         if (_layer is null) return;
         _layer.RemoveAllAdornments();
+        _overlay?.RemoveAllAdornments();
 
         var snapshot = _view.TextSnapshot;
         foreach (var h in _hunks)
@@ -176,7 +186,9 @@ sealed class HunkAdornmentManager
         row.Children.Add(reject);
         Canvas.SetLeft(row, _view.ViewportLeft + 4);
         Canvas.SetTop(row, lastView.Bottom + 2);
-        _layer.AddAdornment(
+        // Overlay layer — sits above editor Text so the button isn't
+        // obscured by the source code drawn in this row.
+        (_overlay ?? _layer).AddAdornment(
             AdornmentPositioningBehavior.OwnerControlled,
             span, AdornmentTagFor(h, "accepted-reject"), row, null);
     }
@@ -270,15 +282,22 @@ sealed class HunkAdornmentManager
 
         Canvas.SetLeft(combined, _view.ViewportLeft + 4);
         Canvas.SetTop(combined, belowY + 2);
-        _layer.AddAdornment(
+        // Overlay layer (above Text). The row sits in line-space below the
+        // hunk's last line; if we put it on the background layer the
+        // editor's own text in that row paints over it and the box looks
+        // half-transparent, half-missing. Falls back to the background
+        // layer if MEF gave us only one (defensive — should never happen).
+        (_overlay ?? _layer).AddAdornment(
             AdornmentPositioningBehavior.OwnerControlled,
             anchorSpan, AdornmentTagFor(h, "row"), combined, null);
     }
 
-    // 28×20 each + 6px gap between = 62 total width. Used to right-align
-    // the row inside the viewport.
-    const double SmallButtonWidth = 28;
-    const double SmallButtonHeight = 20;
+    // Square 24×24 buttons sized to match the Expander header chrome
+    // (FontSize 11 + Padding (6,2,6,2) + ~border ≈ 24px tall) so the
+    // accept/reject row lines up perfectly with the "{N} removed lines"
+    // header. 6px gap between the two buttons.
+    const double SmallButtonWidth = 24;
+    const double SmallButtonHeight = 24;
     const double SmallButtonGap = 6;
     const double OpenButtonRowWidth = SmallButtonWidth * 2 + SmallButtonGap;
 
@@ -383,11 +402,10 @@ sealed class HunkAdornmentManager
         catch (Exception ex) { Debug.WriteLine($"[ChatRelay.editor] RejectHunk failed: {ex.Message}"); }
     }
 
-    // 28×20 icon-only buttons — accept gets the brand turquoise, reject
-    // gets a theme-bound neutral surface. Sized at roughly a third of
-    // the original 64×32 footprint so the inline UI stays out of the
-    // user's way. Custom ControlTemplate so WPF's default hover/pressed
-    // gradients don't override our colors.
+    // 24×24 icon-only buttons — accept gets the brand turquoise, reject
+    // gets a theme-bound neutral surface. Squared off to line up with the
+    // Expander header next to them. Custom ControlTemplate so WPF's
+    // default hover/pressed gradients don't override our colors.
     static Button BuildIconButton(string glyph, bool primary)
     {
         var btn = new Button
@@ -395,7 +413,7 @@ sealed class HunkAdornmentManager
             Content = glyph,
             Width = SmallButtonWidth,
             Height = SmallButtonHeight,
-            FontSize = 11,
+            FontSize = 13,    // bumped from 11 to fill the larger square
             Padding = new Thickness(0),
             Cursor = System.Windows.Input.Cursors.Hand,
             HorizontalContentAlignment = HorizontalAlignment.Center,
