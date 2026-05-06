@@ -242,33 +242,48 @@ public sealed class HunkOperationsTests : IDisposable
     }
 
     [Fact]
-    public void Subsequent_model_edit_prunes_stale_AcceptedHunks()
+    public void Re_edit_at_same_baseline_coords_with_different_content_returns_to_open()
     {
+        // Regression for the carry-forward bug: previously HunkKey was
+        // (BaselineStart, BaselineCount) only, so a follow-up edit at the
+        // same coords inherited the prior accept-marker. Now the key
+        // includes the new-side content, so a different new content
+        // produces a different key — the new hunk must be open and require
+        // fresh user approval.
+        var path = MakeFile("foo.cs", "a\nb\nc\n");
+        EditCycle(path, "A\nb\nc\n");                             // hunk: (0,1) → ["A"]
+        var firstHunk = _tracker.Snapshot(SessionId).Proposals[0].Hunks[0];
+        Assert.True(_tracker.AcceptHunk(SessionId, path, firstHunk.BaselineStart, firstHunk.BaselineCount));
+        Assert.Equal("accepted", _tracker.Snapshot(SessionId).Proposals[0].Hunks[0].State);
+
+        // Model edits the same line again with DIFFERENT content. Same
+        // baseline coords (0,1) but new content "X" instead of "A".
+        EditCycle(path, "X\nb\nc\n");
+
+        var newHunk = _tracker.Snapshot(SessionId).Proposals[0].Hunks[0];
+        Assert.Equal(0, newHunk.BaselineStart);
+        Assert.Equal(1, newHunk.BaselineCount);
+        Assert.Equal("open", newHunk.State);    // ← was "accepted" before the fix
+    }
+
+    [Fact]
+    public void Re_edit_at_same_baseline_coords_with_same_content_keeps_accepted()
+    {
+        // Counterpart to the test above: if the model regenerates the
+        // same hunk on a subsequent turn (same coords AND same new
+        // content) the prior accept-marker stays applied — the user
+        // already approved this exact change.
         var path = MakeFile("foo.cs", "a\nb\nc\n");
         EditCycle(path, "A\nb\nc\n");
         var firstHunk = _tracker.Snapshot(SessionId).Proposals[0].Hunks[0];
         Assert.True(_tracker.AcceptHunk(SessionId, path, firstHunk.BaselineStart, firstHunk.BaselineCount));
 
-        // Model edits the SAME line again, producing a different hunk.
-        // The accept-marker for the prior shape mustn't carry forward to a
-        // hunk whose baseline coords no longer appear in the diff.
-        EditCycle(path, "X\nb\nc\n");
+        // Same content as before — the model "rewrote" the file but to
+        // an identical end state. Could happen on a no-op turn.
+        EditCycle(path, "A\nb\nc\n");
 
-        var p = _tracker.Snapshot(SessionId).Proposals[0];
-        // The replacement hunk has the same coords (0, 1) — for now we
-        // accept that the previous accept transfers, since we identify
-        // hunks by baseline position alone. If the model produced a hunk
-        // with a different baseline shape, the previous accept would be
-        // pruned. This test pins down the current behaviour.
-        Assert.Single(p.Hunks);
-
-        // Now do a real shape-change: model removes the first line entirely.
-        EditCycle(path, "b\nc\n");
-        var p2 = _tracker.Snapshot(SessionId).Proposals[0];
-        // Hunk shape is now (0, 1) → 0 lines (pure deletion). The previous
-        // accept was for a (0, 1) → 1 line replacement — same baseline coords
-        // but different new content. Per the v1 limitation, it carries over
-        // here. The acceptance applies to whatever the current hunk is.
-        Assert.Single(p2.Hunks);
+        var snap = _tracker.Snapshot(SessionId);
+        var stillThere = snap.Proposals[0].Hunks[0];
+        Assert.Equal("accepted", stillThere.State);
     }
 }

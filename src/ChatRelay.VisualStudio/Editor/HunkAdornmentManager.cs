@@ -161,9 +161,9 @@ sealed class HunkAdornmentManager
             AdornmentPositioningBehavior.OwnerControlled,
             span, AdornmentTagFor(h, "accepted-bar"), bar, null);
 
-        // Reject button below the region — same 64×32 secondary style as
-        // open hunks, so the user can still revert. Accept button is
-        // intentionally absent (already accepted).
+        // Reject button below the region — same compact secondary style
+        // as open hunks, right-aligned to match. Accept is intentionally
+        // absent (already accepted).
         var reject = BuildIconButton("↶", primary: false);
         reject.ToolTip = $"Revert this change ({modelLabel})";
         reject.Click += async (_, _) => await OnRejectClicked(h);
@@ -171,10 +171,10 @@ sealed class HunkAdornmentManager
         var row = new StackPanel
         {
             Orientation = Orientation.Horizontal,
-            HorizontalAlignment = HorizontalAlignment.Left,
+            HorizontalAlignment = HorizontalAlignment.Right,
         };
         row.Children.Add(reject);
-        Canvas.SetLeft(row, _view.ViewportLeft + 8);
+        Canvas.SetLeft(row, _view.ViewportRight - SmallButtonWidth - 8);
         Canvas.SetTop(row, lastView.Bottom + 2);
         _layer.AddAdornment(
             AdornmentPositioningBehavior.OwnerControlled,
@@ -186,7 +186,7 @@ sealed class HunkAdornmentManager
         if (_layer is null) return;
 
         // ---- 1. Highlight rectangle behind the new lines (when any) -----
-        double belowY;       // Y to position the panel/buttons block
+        double belowY;       // Y to position the expander + buttons row
 
         if (h.CurrentCount > 0
             && h.CurrentStart >= 0
@@ -235,38 +235,38 @@ sealed class HunkAdornmentManager
             belowY = view.Top;
         }
 
-        // ---- 2. Panel below: optional ghost expander + button row -------
-
-        var panel = BuildBelowPanel(h);
-        // Anchor at the left edge of the viewport so the buttons sit at
-        // the start of the editor pane regardless of scroll. A small
-        // top margin gives breathing room from the highlight.
-        Canvas.SetLeft(panel, _view.ViewportLeft + 4);
-        Canvas.SetTop(panel, belowY + 2);
+        // ---- 2. Below the highlight: expander on the left, buttons on
+        //         the right. Two separate adornments so the buttons can
+        //         pin to the viewport's right edge while the expander
+        //         hugs the left.
 
         var anchorSpan = new SnapshotSpan(
             snapshot.GetLineFromLineNumber(Math.Max(0, h.CurrentStart)).Start, 0);
-        _layer.AddAdornment(
-            AdornmentPositioningBehavior.OwnerControlled,
-            anchorSpan, AdornmentTagFor(h, "panel"), panel, null);
-    }
 
-    FrameworkElement BuildBelowPanel(HunkInfo h)
-    {
-        var stack = new StackPanel
-        {
-            Orientation = Orientation.Vertical,
-        };
-
-        // Ghost expander (only when there are old lines to show).
         if (h.BaselineLines.Count > 0)
         {
-            stack.Children.Add(BuildGhostExpander(h));
+            var expander = BuildGhostExpander(h);
+            Canvas.SetLeft(expander, _view.ViewportLeft + 4);
+            Canvas.SetTop(expander, belowY + 2);
+            _layer.AddAdornment(
+                AdornmentPositioningBehavior.OwnerControlled,
+                anchorSpan, AdornmentTagFor(h, "expander"), expander, null);
         }
 
-        stack.Children.Add(BuildButtonRow(h));
-        return stack;
+        var buttons = BuildButtonRow(h);
+        Canvas.SetLeft(buttons, _view.ViewportRight - OpenButtonRowWidth - 8);
+        Canvas.SetTop(buttons, belowY + 2);
+        _layer.AddAdornment(
+            AdornmentPositioningBehavior.OwnerControlled,
+            anchorSpan, AdornmentTagFor(h, "buttons"), buttons, null);
     }
+
+    // 28×20 each + 6px gap between = 62 total width. Used to right-align
+    // the row inside the viewport.
+    const double SmallButtonWidth = 28;
+    const double SmallButtonHeight = 20;
+    const double SmallButtonGap = 6;
+    const double OpenButtonRowWidth = SmallButtonWidth * 2 + SmallButtonGap;
 
     FrameworkElement BuildGhostExpander(HunkInfo h)
     {
@@ -312,7 +312,7 @@ sealed class HunkAdornmentManager
         var row = new StackPanel
         {
             Orientation = Orientation.Horizontal,
-            HorizontalAlignment = HorizontalAlignment.Left,
+            HorizontalAlignment = HorizontalAlignment.Right,
         };
 
         var accept = BuildIconButton("✓", primary: true);
@@ -322,7 +322,7 @@ sealed class HunkAdornmentManager
 
         var reject = BuildIconButton("↶", primary: false);
         reject.ToolTip = "Revert this change";
-        reject.Margin = new Thickness(6, 0, 0, 0);
+        reject.Margin = new Thickness(SmallButtonGap, 0, 0, 0);
         reject.Click += async (_, _) => await OnRejectClicked(h);
         row.Children.Add(reject);
 
@@ -347,17 +347,20 @@ sealed class HunkAdornmentManager
         catch (Exception ex) { Debug.WriteLine($"[ChatRelay.editor] RejectHunk failed: {ex.Message}"); }
     }
 
-    // 64×32 icon-only buttons — accept gets the brand turquoise, reject
-    // gets a theme-bound neutral surface. Custom ControlTemplate so WPF's
-    // default hover/pressed gradients don't override our colors.
+    // 28×20 icon-only buttons — accept gets the brand turquoise, reject
+    // gets a theme-bound neutral surface. Sized at roughly a third of
+    // the original 64×32 footprint so the inline UI stays out of the
+    // user's way. Custom ControlTemplate so WPF's default hover/pressed
+    // gradients don't override our colors.
     static Button BuildIconButton(string glyph, bool primary)
     {
         var btn = new Button
         {
             Content = glyph,
-            Width = 64,
-            Height = 32,
-            FontSize = 16,
+            Width = SmallButtonWidth,
+            Height = SmallButtonHeight,
+            FontSize = 11,
+            Padding = new Thickness(0),
             Cursor = System.Windows.Input.Cursors.Hand,
             HorizontalContentAlignment = HorizontalAlignment.Center,
             VerticalContentAlignment = VerticalAlignment.Center,

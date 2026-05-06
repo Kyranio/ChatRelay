@@ -150,7 +150,7 @@ public sealed class ChangeTracker
             f.IsAccepted = true;
             f.AcceptedHunks.Clear();
             foreach (var h in LineDiff.ComputeHunks(f.Baseline, f.LastApplied))
-                f.AcceptedHunks.Add(new HunkKey(h.OldStart, h.OldCount));
+                f.AcceptedHunks.Add(MakeKey(h));
             changed = true;
         }
         if (changed) FireNotify(sessionId);
@@ -174,9 +174,9 @@ public sealed class ChangeTracker
             if (!s.Files.TryGetValue(NormalisePath(filePath), out var f)) return false;
 
             var hunks = LineDiff.ComputeHunks(f.Baseline, f.LastApplied);
-            var key = new HunkKey(baselineStart, baselineCount);
-            var hunk = FindHunk(hunks, key);
+            var hunk = FindHunkByCoords(hunks, baselineStart, baselineCount);
             if (hunk is null) return false;
+            var key = MakeKey(hunk.Value);
             if (f.AcceptedHunks.Contains(key)) return false;   // already accepted
 
             // Project the hunk's baseline position into Accepted-coordinates
@@ -212,10 +212,10 @@ public sealed class ChangeTracker
             if (!s.Files.TryGetValue(NormalisePath(filePath), out var f)) return false;
 
             var hunks = LineDiff.ComputeHunks(f.Baseline, f.LastApplied);
-            var key = new HunkKey(baselineStart, baselineCount);
-            var hunkOpt = FindHunk(hunks, key);
+            var hunkOpt = FindHunkByCoords(hunks, baselineStart, baselineCount);
             if (hunkOpt is null) return false;
             var hunk = hunkOpt.Value;
+            var key = MakeKey(hunk);
 
             bool wasAccepted = f.AcceptedHunks.Contains(key);
 
@@ -272,13 +272,29 @@ public sealed class ChangeTracker
         return changed;
     }
 
-    static LineDiff.Hunk? FindHunk(IReadOnlyList<LineDiff.Hunk> hunks, HunkKey key)
+    // Coordinate-only lookup for the wire-dispatched accept/reject RPCs:
+    // the shell only sends (BaselineStart, BaselineCount), so we locate
+    // the hunk by those alone and build the full HunkKey (including
+    // content) from the resolved hunk.
+    static LineDiff.Hunk? FindHunkByCoords(IReadOnlyList<LineDiff.Hunk> hunks, int baselineStart, int baselineCount)
     {
         for (int i = 0; i < hunks.Count; i++)
-            if (hunks[i].OldStart == key.BaselineStart && hunks[i].OldCount == key.BaselineCount)
+            if (hunks[i].OldStart == baselineStart && hunks[i].OldCount == baselineCount)
                 return hunks[i];
         return null;
     }
+
+    /// <summary>
+    /// Builds a content-aware <see cref="HunkKey"/> for the given hunk.
+    /// Same coordinates + same new-side content → same key. The content
+    /// term is what makes the prior accept marker NOT carry forward when
+    /// the model produces a different hunk at the same baseline coords
+    /// on a follow-up turn.
+    /// </summary>
+    static HunkKey MakeKey(LineDiff.Hunk h) =>
+        new(h.OldStart, h.OldCount, JoinLines(h.NewLines));
+
+    static string JoinLines(IReadOnlyList<string> lines) => string.Join("\n", lines);
 
     // Maps a Baseline-line-number to its corresponding line in Accepted, by
     // walking ALL hunks the model produced (in baseline order) and shifting
@@ -289,7 +305,7 @@ public sealed class ChangeTracker
         foreach (var h in hunks.OrderBy(x => x.OldStart))
         {
             if (h.OldStart >= baselineStart) break;
-            if (f.AcceptedHunks.Contains(new HunkKey(h.OldStart, h.OldCount)))
+            if (f.AcceptedHunks.Contains(MakeKey(h)))
                 projected += h.NewCount - h.OldCount;
         }
         return projected;
@@ -409,7 +425,7 @@ public sealed class ChangeTracker
                 f.IsAccepted = true;
                 f.AcceptedHunks.Clear();
                 foreach (var h in LineDiff.ComputeHunks(f.Baseline, f.LastApplied))
-                    f.AcceptedHunks.Add(new HunkKey(h.OldStart, h.OldCount));
+                    f.AcceptedHunks.Add(MakeKey(h));
                 any = true;
             }
         }
@@ -464,7 +480,7 @@ public sealed class ChangeTracker
         if (f.AcceptedHunks.Count == 0) return;
         var hunks = LineDiff.ComputeHunks(f.Baseline, f.LastApplied);
         var valid = new HashSet<HunkKey>();
-        foreach (var h in hunks) valid.Add(new HunkKey(h.OldStart, h.OldCount));
+        foreach (var h in hunks) valid.Add(MakeKey(h));
         f.AcceptedHunks.RemoveWhere(k => !valid.Contains(k));
     }
 
@@ -476,7 +492,7 @@ public sealed class ChangeTracker
         if (f.AcceptedHunks.Count == 0) return f.Baseline;
         var hunks = LineDiff.ComputeHunks(f.Baseline, f.LastApplied);
         var byKey = new Dictionary<HunkKey, LineDiff.Hunk>();
-        foreach (var h in hunks) byKey[new HunkKey(h.OldStart, h.OldCount)] = h;
+        foreach (var h in hunks) byKey[MakeKey(h)] = h;
 
         var content = f.Baseline;
         // Reverse baseline-order so each splice's coordinates still address
@@ -788,7 +804,7 @@ public sealed class ChangeTracker
                 var hunkInfos = new List<HunkInfo>(hunks.Count);
                 foreach (var h in hunks)
                 {
-                    var key = new HunkKey(h.OldStart, h.OldCount);
+                    var key = MakeKey(h);
                     hunkInfos.Add(new HunkInfo(
                         BaselineStart: h.OldStart,
                         BaselineCount: h.OldCount,

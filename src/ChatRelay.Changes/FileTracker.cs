@@ -96,11 +96,20 @@ public sealed class FileTracker
 }
 
 /// <summary>
-/// Identifies a hunk by its (Baseline-line-start, Baseline-line-count) pair —
-/// stable across snapshot recomputes as long as the model hasn't reshaped
-/// the file enough to make the hunk unrecognisable.
+/// Identifies a hunk by its baseline coordinates AND the model's new-side
+/// content. Including the new content in the key matters for the
+/// "re-edited after accept" case: if the user accepts a hunk, then the
+/// model produces a different hunk at the same <c>(BaselineStart,
+/// BaselineCount)</c> on a subsequent turn, the new hunk's
+/// <c>NewContent</c> differs and the prior accept does NOT carry forward
+/// — the user has to evaluate the new content on its own merit.
+///
+/// <para>
+/// <c>NewContent</c> is the LF-joined <c>NewLines</c> string. Cheap to
+/// compute, structural equality on records gives us free set semantics.
+/// </para>
 /// </summary>
-public readonly record struct HunkKey(int BaselineStart, int BaselineCount);
+public readonly record struct HunkKey(int BaselineStart, int BaselineCount, string NewContent);
 
 /// <summary>
 /// One deny entry. Holds the content we'd write back on redo plus the disk
