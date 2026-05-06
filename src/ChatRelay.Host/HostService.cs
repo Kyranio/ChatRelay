@@ -428,6 +428,20 @@ public sealed class HostService
         return Task.CompletedTask;
     }
 
+    [JsonRpcMethod("acceptHunk", UseSingleObjectParameterDeserialization = true)]
+    public Task AcceptHunkAsync(AcceptHunkParams p)
+    {
+        _changes.AcceptHunk(p.SessionId, p.FilePath, p.BaselineStart, p.BaselineCount);
+        return Task.CompletedTask;
+    }
+
+    [JsonRpcMethod("rejectHunk", UseSingleObjectParameterDeserialization = true)]
+    public Task RejectHunkAsync(RejectHunkParams p)
+    {
+        _changes.RejectHunk(p.SessionId, p.FilePath, p.BaselineStart, p.BaselineCount);
+        return Task.CompletedTask;
+    }
+
     [JsonRpcMethod("redoDeniedChange", UseSingleObjectParameterDeserialization = true)]
     public Task RedoDeniedChangeAsync(RedoDeniedChangeParams p)
     {

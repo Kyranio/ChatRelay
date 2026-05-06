@@ -126,13 +126,157 @@ public sealed class ChangeTracker
         {
             if (!s.Files.TryGetValue(NormalisePath(filePath), out var f)) return false;
             if (!f.HasProposal) return false;
-            // Whole-file accept: lock in the current LastApplied as Accepted.
+            // Whole-file accept: lock in the current LastApplied as Accepted,
+            // AND populate AcceptedHunks with every current hunk so per-hunk
+            // reject after a whole-file accept can correctly identify which
+            // hunks need to be reverted in Accepted vs. just LastApplied.
             f.Accepted = f.LastApplied;
             f.IsAccepted = true;
+            f.AcceptedHunks.Clear();
+            foreach (var h in LineDiff.ComputeHunks(f.Baseline, f.LastApplied))
+                f.AcceptedHunks.Add(new HunkKey(h.OldStart, h.OldCount));
             changed = true;
         }
         if (changed) FireNotify(sessionId);
         return changed;
+    }
+
+    /// <summary>
+    /// Accepts a single hunk, identified by its position in the baseline
+    /// (<paramref name="baselineStart"/> + <paramref name="baselineCount"/>).
+    /// Splices the hunk's model-side lines into <c>Accepted</c> at the
+    /// position adjusted for already-accepted hunks; no disk write
+    /// (<c>LastApplied</c> already has the model's content). No-op if the
+    /// hunk doesn't exist in the current diff or is already accepted.
+    /// </summary>
+    public bool AcceptHunk(string sessionId, string filePath, int baselineStart, int baselineCount)
+    {
+        var s = GetOrCreate(sessionId);
+        bool changed = false;
+        lock (s.Sync)
+        {
+            if (!s.Files.TryGetValue(NormalisePath(filePath), out var f)) return false;
+
+            var hunks = LineDiff.ComputeHunks(f.Baseline, f.LastApplied);
+            var key = new HunkKey(baselineStart, baselineCount);
+            var hunk = FindHunk(hunks, key);
+            if (hunk is null) return false;
+            if (f.AcceptedHunks.Contains(key)) return false;   // already accepted
+
+            // Project the hunk's baseline position into Accepted-coordinates
+            // by shifting for previously-accepted hunks that come before it.
+            int projected = ProjectBaselineToAccepted(f, hunks, baselineStart);
+            f.Accepted = LineDiff.SpliceLines(f.Accepted, projected, hunk.Value.OldCount, hunk.Value.NewLines);
+            f.AcceptedHunks.Add(key);
+
+            // If every hunk is now accepted, the file matches LastApplied —
+            // mirror the whole-file-accepted IsAccepted flag.
+            if (string.Equals(f.Accepted, f.LastApplied, StringComparison.Ordinal))
+                f.IsAccepted = true;
+
+            changed = true;
+        }
+        if (changed) FireNotify(sessionId);
+        return changed;
+    }
+
+    /// <summary>
+    /// Rejects a single hunk, identified by baseline coordinates. Splices
+    /// the baseline content back into LastApplied (and into Accepted if the
+    /// hunk had been accepted), writes the file to disk, and stashes a
+    /// denial record so the user can redo. Works on both open and accepted
+    /// hunks; the file's region returns to baseline either way.
+    /// </summary>
+    public bool RejectHunk(string sessionId, string filePath, int baselineStart, int baselineCount)
+    {
+        var s = GetOrCreate(sessionId);
+        bool changed = false;
+        lock (s.Sync)
+        {
+            if (!s.Files.TryGetValue(NormalisePath(filePath), out var f)) return false;
+
+            var hunks = LineDiff.ComputeHunks(f.Baseline, f.LastApplied);
+            var key = new HunkKey(baselineStart, baselineCount);
+            var hunkOpt = FindHunk(hunks, key);
+            if (hunkOpt is null) return false;
+            var hunk = hunkOpt.Value;
+
+            bool wasAccepted = f.AcceptedHunks.Contains(key);
+
+            // Capture pre-reject snapshot for the redo path.
+            var preRejectLastApplied = f.LastApplied;
+
+            // Splice baseline content into LastApplied at the hunk's
+            // current position. Effect: that region now matches Baseline.
+            var newLastApplied = LineDiff.SpliceLines(
+                f.LastApplied, hunk.NewStart, hunk.NewCount, hunk.OldLines);
+
+            // If the hunk had been accepted, also revert it in Accepted —
+            // otherwise Accepted would still contain NewLines at that
+            // position and snapshot diffs would mis-classify the file.
+            string newAccepted = f.Accepted;
+            if (wasAccepted)
+            {
+                int projected = ProjectBaselineToAccepted(f, hunks, baselineStart);
+                newAccepted = LineDiff.SpliceLines(newAccepted, projected, hunk.NewCount, hunk.OldLines);
+            }
+
+            try
+            {
+                File.WriteAllText(f.AbsolutePath, newLastApplied);
+            }
+            catch (Exception ex)
+            {
+                ExtensionLogger.Warn("changes", $"Hunk reject write failed for {f.AbsolutePath}: {ex.Message}");
+                return false;
+            }
+
+            f.LastApplied = newLastApplied;
+            f.Accepted = newAccepted;
+            f.AcceptedHunks.Remove(key);
+            f.IsAccepted = false;
+
+            // The denial is whole-file: ContentToReapply restores the file
+            // to its pre-reject state in one shot. Simpler than per-hunk
+            // bookkeeping and works regardless of subsequent operations.
+            int linesAdded = hunk.NewCount;
+            int linesRemoved = hunk.OldCount;
+            f.Denied.Add(new DeniedChangeRecord
+            {
+                Id = Guid.NewGuid().ToString("N"),
+                DeniedAt = DateTime.UtcNow,
+                ContentToReapply = preRejectLastApplied,
+                DiskContentAtDeny = newLastApplied,
+                LinesAdded = linesAdded,
+                LinesRemoved = linesRemoved,
+            });
+            changed = true;
+        }
+        if (changed) FireNotify(sessionId);
+        return changed;
+    }
+
+    static LineDiff.Hunk? FindHunk(IReadOnlyList<LineDiff.Hunk> hunks, HunkKey key)
+    {
+        for (int i = 0; i < hunks.Count; i++)
+            if (hunks[i].OldStart == key.BaselineStart && hunks[i].OldCount == key.BaselineCount)
+                return hunks[i];
+        return null;
+    }
+
+    // Maps a Baseline-line-number to its corresponding line in Accepted, by
+    // walking ALL hunks the model produced (in baseline order) and shifting
+    // for those the user has accepted that lie strictly before the target.
+    static int ProjectBaselineToAccepted(FileTracker f, IReadOnlyList<LineDiff.Hunk> hunks, int baselineStart)
+    {
+        int projected = baselineStart;
+        foreach (var h in hunks.OrderBy(x => x.OldStart))
+        {
+            if (h.OldStart >= baselineStart) break;
+            if (f.AcceptedHunks.Contains(new HunkKey(h.OldStart, h.OldCount)))
+                projected += h.NewCount - h.OldCount;
+        }
+        return projected;
     }
 
     public bool Deny(string sessionId, string filePath)
@@ -183,6 +327,7 @@ public sealed class ChangeTracker
             f.LastApplied = f.Baseline;
             f.Accepted = f.Baseline;     // reset; may previously have equalled the old LastApplied
             f.IsAccepted = false;
+            f.AcceptedHunks.Clear();     // whole-file revert wipes any per-hunk accepts too
             f.Denied.Add(record);
             changed = true;
         }
@@ -246,6 +391,9 @@ public sealed class ChangeTracker
                 if (!f.HasOpenChanges) continue;
                 f.Accepted = f.LastApplied;
                 f.IsAccepted = true;
+                f.AcceptedHunks.Clear();
+                foreach (var h in LineDiff.ComputeHunks(f.Baseline, f.LastApplied))
+                    f.AcceptedHunks.Add(new HunkKey(h.OldStart, h.OldCount));
                 any = true;
             }
         }
@@ -280,12 +428,50 @@ public sealed class ChangeTracker
                 }
                 f.LastApplied = f.Accepted;
                 f.IsAccepted = false;
+                // Per-hunk accepts that survived bulk-deny stay valid against
+                // the new (smaller) hunk set; prune any stale keys.
+                PruneStaleAcceptedHunksLocked(f);
                 f.Denied.Add(record);
                 any = true;
             }
         }
         if (any) FireNotify(sessionId);
         return any;
+    }
+
+    // Drops AcceptedHunks entries that no longer correspond to a hunk in
+    // the current diff(Baseline, LastApplied). Called whenever LastApplied
+    // changes (model edits, redo, bulk deny) so per-hunk accept state can't
+    // outlive the hunks themselves.
+    static void PruneStaleAcceptedHunksLocked(FileTracker f)
+    {
+        if (f.AcceptedHunks.Count == 0) return;
+        var hunks = LineDiff.ComputeHunks(f.Baseline, f.LastApplied);
+        var valid = new HashSet<HunkKey>();
+        foreach (var h in hunks) valid.Add(new HunkKey(h.OldStart, h.OldCount));
+        f.AcceptedHunks.RemoveWhere(k => !valid.Contains(k));
+    }
+
+    // Recomputes the Accepted blob from Baseline + the AcceptedHunks set.
+    // Splices the model's new lines in for each accepted hunk, applied in
+    // reverse baseline-order so earlier coordinates stay valid as we go.
+    static string ApplyAcceptedHunks(FileTracker f)
+    {
+        if (f.AcceptedHunks.Count == 0) return f.Baseline;
+        var hunks = LineDiff.ComputeHunks(f.Baseline, f.LastApplied);
+        var byKey = new Dictionary<HunkKey, LineDiff.Hunk>();
+        foreach (var h in hunks) byKey[new HunkKey(h.OldStart, h.OldCount)] = h;
+
+        var content = f.Baseline;
+        // Reverse baseline-order so each splice's coordinates still address
+        // unmodified content (earlier hunks haven't been applied yet).
+        var ordered = f.AcceptedHunks
+            .Where(byKey.ContainsKey)
+            .OrderByDescending(k => k.BaselineStart)
+            .Select(k => byKey[k]);
+        foreach (var h in ordered)
+            content = LineDiff.SpliceLines(content, h.OldStart, h.OldCount, h.NewLines);
+        return content;
     }
 
     public int CountOpen(string sessionId)
@@ -351,6 +537,7 @@ public sealed class ChangeTracker
                     existing.Accepted = current;
                     existing.LastApplied = current;
                     existing.IsAccepted = false;
+                    existing.AcceptedHunks.Clear();
                     existing.Denied.Clear();
                 }
             }
@@ -411,6 +598,13 @@ public sealed class ChangeTracker
         // check (against LastApplied) will correctly identify subsequent
         // events for this file as our own writes.
         f.ExpectingWrite = false;
+
+        // Per-hunk accepts we held may now reference hunks that don't exist
+        // in the new diff — drop stale keys, then recompute the Accepted
+        // blob from Baseline + the surviving accepted hunks so it stays
+        // internally consistent with AcceptedHunks.
+        PruneStaleAcceptedHunksLocked(f);
+        f.Accepted = ApplyAcceptedHunks(f);
         // Subsequent model edit invalidates any prior denial whose post-deny
         // disk state no longer matches reality. Per spec: "Once the file is
         // modified ... the removed changes will be cleared from the session
@@ -568,12 +762,27 @@ public sealed class ChangeTracker
             if (f.HasProposal)
             {
                 var counts = LineDiff.Compute(f.Baseline, f.LastApplied);
+                var hunks = LineDiff.ComputeHunks(f.Baseline, f.LastApplied);
+                var hunkInfos = new List<HunkInfo>(hunks.Count);
+                foreach (var h in hunks)
+                {
+                    var key = new HunkKey(h.OldStart, h.OldCount);
+                    hunkInfos.Add(new HunkInfo(
+                        BaselineStart: h.OldStart,
+                        BaselineCount: h.OldCount,
+                        CurrentStart: h.NewStart,
+                        CurrentCount: h.NewCount,
+                        BaselineLines: h.OldLines,
+                        CurrentLines: h.NewLines,
+                        State: f.AcceptedHunks.Contains(key) ? "accepted" : "open"));
+                }
                 proposals.Add(new ChangeProposal(
                     FilePath: f.DisplayPath,
                     AbsolutePath: f.AbsolutePath,
                     LinesAdded: counts.Added,
                     LinesRemoved: counts.Removed,
-                    State: f.IsAccepted && !f.HasOpenChanges ? "accepted" : "open"));
+                    State: f.IsAccepted && !f.HasOpenChanges ? "accepted" : "open",
+                    Hunks: hunkInfos));
             }
 
             if (f.Denied.Count > 0)

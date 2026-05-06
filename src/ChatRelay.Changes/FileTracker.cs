@@ -51,6 +51,19 @@ public sealed class FileTracker
     /// </summary>
     public List<DeniedChangeRecord> Denied { get; } = new();
 
+    /// <summary>
+    /// Hunks the user has explicitly accepted, identified by their position
+    /// in <see cref="Baseline"/>. <see cref="Accepted"/> is derivable from
+    /// <see cref="Baseline"/> + this set, but we maintain it as a blob for
+    /// snapshot speed and to keep whole-file accept / deny semantics
+    /// uniform with per-hunk operations.
+    /// <para>
+    /// Stale entries (hunks the model has since reshaped past recognition)
+    /// are pruned in <c>UpdateLastAppliedLocked</c> after a fresh write.
+    /// </para>
+    /// </summary>
+    public HashSet<HunkKey> AcceptedHunks { get; } = new();
+
     /// <summary>True iff Accepted differs from LastApplied — i.e. there are open hunks.</summary>
     public bool HasOpenChanges => !string.Equals(Accepted, LastApplied, StringComparison.Ordinal);
 
@@ -67,6 +80,13 @@ public sealed class FileTracker
     /// </summary>
     public bool ExpectingWrite { get; set; }
 }
+
+/// <summary>
+/// Identifies a hunk by its (Baseline-line-start, Baseline-line-count) pair —
+/// stable across snapshot recomputes as long as the model hasn't reshaped
+/// the file enough to make the hunk unrecognisable.
+/// </summary>
+public readonly record struct HunkKey(int BaselineStart, int BaselineCount);
 
 /// <summary>
 /// One deny entry. Holds the content we'd write back on redo plus the disk

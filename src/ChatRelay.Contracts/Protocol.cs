@@ -106,6 +106,23 @@ public record ChangeProposal(
     string AbsolutePath,
     int LinesAdded,
     int LinesRemoved,
+    string State,                            // "open" | "accepted" — file-level rollup
+    IReadOnlyList<HunkInfo> Hunks);          // empty when nothing left to show
+
+/// <summary>
+/// One model-vs-baseline edit hunk in a tracked file. Coordinates are
+/// 0-based line indices. Use <c>BaselineStart</c>/<c>BaselineCount</c> as
+/// the stable identifier for accept / reject RPCs — host re-computes the
+/// diff and locates the matching hunk by those coordinates so the click
+/// stays correct even if the snapshot has been refreshed in between.
+/// </summary>
+public record HunkInfo(
+    int BaselineStart,
+    int BaselineCount,
+    int CurrentStart,
+    int CurrentCount,
+    IReadOnlyList<string> BaselineLines,
+    IReadOnlyList<string> CurrentLines,
     string State);              // "open" | "accepted"
 
 public record DenialGroup(
@@ -125,5 +142,13 @@ public record AcceptChangeParams(string SessionId, string FilePath);
 public record DenyChangeParams(string SessionId, string FilePath);
 public record RedoDeniedChangeParams(string SessionId, string FilePath, string DenialId);
 public record BulkChangesParams(string SessionId);
+
+// Per-hunk operations. BaselineStart + BaselineCount identify the hunk in
+// stable Baseline coordinates; the host re-runs the diff and finds the
+// matching hunk on each call. AcceptHunk only succeeds on hunks that are
+// currently in the "open" state; RejectHunk works on either state and
+// always lands the file's region back at Baseline content.
+public record AcceptHunkParams(string SessionId, string FilePath, int BaselineStart, int BaselineCount);
+public record RejectHunkParams(string SessionId, string FilePath, int BaselineStart, int BaselineCount);
 
 public record ChangesUpdatedEvent(SessionChangesSnapshot Snapshot);
