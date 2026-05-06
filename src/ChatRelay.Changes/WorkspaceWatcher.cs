@@ -33,9 +33,10 @@ public sealed class WorkspaceWatcher : IDisposable
         {
             IncludeSubdirectories = true,
             // LastWrite covers content saves; FileName covers create/rename.
-            // Adding Size or Attributes triggers spurious events for things
-            // like indexer touches, so we deliberately leave them out.
-            NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName,
+            // Size catches direct in-place writes that don't update LastWrite
+            // mtime (NTFS sometimes coalesces). Attributes is omitted to
+            // avoid spurious events from the VS file indexer.
+            NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.Size,
             // Default 8 KB overflows on busy directories (build outputs,
             // node_modules-style trees). 64 KB is the conventional bump.
             InternalBufferSize = 64 * 1024,
@@ -46,10 +47,15 @@ public sealed class WorkspaceWatcher : IDisposable
         _fsw.Renamed += OnRenamed;
         _fsw.Error += OnError;
         _fsw.EnableRaisingEvents = true;
+        ExtensionLogger.Info("changes", $"Watcher started on {root}");
     }
 
     void OnChanged(object sender, FileSystemEventArgs e)
     {
+        // Info-level on purpose — diagnostic for the "did the watcher fire?"
+        // question. Once Phase 3 is stable, drop these to Debug so a busy
+        // workspace doesn't spam the log.
+        ExtensionLogger.Info("changes", $"Watcher {e.ChangeType}: {e.FullPath}");
         try { _onChange(e.FullPath); }
         catch (Exception ex)
         {
@@ -62,6 +68,7 @@ public sealed class WorkspaceWatcher : IDisposable
         // Treat the rename target as a fresh write at its new path. The
         // old path is not touched here — orphaned tracker entries (if
         // any) stay until the session ends.
+        ExtensionLogger.Info("changes", $"Watcher Renamed: {e.OldFullPath} -> {e.FullPath}");
         try { _onChange(e.FullPath); }
         catch (Exception ex)
         {

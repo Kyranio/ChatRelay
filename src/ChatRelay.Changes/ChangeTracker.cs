@@ -57,8 +57,16 @@ public sealed class ChangeTracker
     {
         try { _watcher?.Dispose(); } catch { }
         _watcher = null;
-        if (string.IsNullOrEmpty(_workspaceRoot)) return;
-        if (!Directory.Exists(_workspaceRoot)) return;
+        if (string.IsNullOrEmpty(_workspaceRoot))
+        {
+            ExtensionLogger.Info("changes", "Watcher not started: workspace root is empty");
+            return;
+        }
+        if (!Directory.Exists(_workspaceRoot))
+        {
+            ExtensionLogger.Warn("changes", $"Watcher not started: workspace dir does not exist: {_workspaceRoot}");
+            return;
+        }
         try
         {
             _watcher = new WorkspaceWatcher(_workspaceRoot!, OnExternalFileChange);
@@ -379,43 +387,82 @@ public sealed class ChangeTracker
     /// </summary>
     void OnExternalFileChange(string absolutePath)
     {
-        string content;
-        try
-        {
-            if (!File.Exists(absolutePath)) content = string.Empty;
-            else content = File.ReadAllText(absolutePath);
-        }
-        catch
-        {
-            // File locked / mid-write — ignore. The next event for this
-            // path (if any) will retry; if not, the user's next deliberate
-            // action will resolve via the disk re-read.
-            return;
-        }
+        // File-system events fire on a thread-pool thread before the writer
+        // has necessarily released its lock. Retry the read a few times
+        // with a tiny backoff so we don't silently drop a real edit just
+        // because we raced VS's save handle.
+        string? content = TryReadWithRetry(absolutePath);
+        if (content is null) return;
 
         var key = NormalisePath(absolutePath);
         var changedSessions = new List<string>();
+        bool anyTracked = false;
         foreach (var kv in _sessions)
         {
             var session = kv.Value;
             lock (session.Sync)
             {
                 if (!session.Files.TryGetValue(key, out var f)) continue;
+                anyTracked = true;
 
                 // Disk matches a clean state we know about → echo of our own
                 // write or a no-op (e.g. tool that touched but didn't modify).
                 // Don't disturb any denial entries.
-                if (string.Equals(content, f.LastApplied, StringComparison.Ordinal)) continue;
-                if (string.Equals(content, f.Baseline, StringComparison.Ordinal)) continue;
+                if (string.Equals(content, f.LastApplied, StringComparison.Ordinal))
+                {
+                    ExtensionLogger.Debug("changes", $"Watcher echo (LastApplied match): {absolutePath}");
+                    continue;
+                }
+                if (string.Equals(content, f.Baseline, StringComparison.Ordinal))
+                {
+                    ExtensionLogger.Debug("changes", $"Watcher echo (Baseline match): {absolutePath}");
+                    continue;
+                }
 
                 // External modification. Drop denial records whose post-deny
                 // expected state doesn't match the new disk content.
+                var before = f.Denied.Count;
                 var removed = f.Denied.RemoveAll(
                     d => !string.Equals(d.DiskContentAtDeny, content, StringComparison.Ordinal));
+                ExtensionLogger.Info("changes",
+                    $"External edit on {absolutePath}: dropped {removed}/{before} denial(s)");
                 if (removed > 0) changedSessions.Add(kv.Key);
             }
         }
+        if (!anyTracked)
+            ExtensionLogger.Debug("changes", $"Watcher fired for untracked path: {absolutePath}");
         foreach (var sid in changedSessions) FireNotify(sid);
+    }
+
+    // Up to 5 attempts × 50ms gap = ~250ms of grace for the writer to
+    // release its handle. VS's save sequence (write temp → rename) typically
+    // completes in low single-digit ms, so this is generous. Returns null
+    // if every attempt failed — caller treats that as "ignore this event."
+    static string? TryReadWithRetry(string path)
+    {
+        for (int attempt = 0; attempt < 5; attempt++)
+        {
+            try
+            {
+                if (!File.Exists(path)) return string.Empty;
+                return File.ReadAllText(path);
+            }
+            catch (IOException) when (attempt < 4)
+            {
+                Thread.Sleep(50);
+            }
+            catch (UnauthorizedAccessException) when (attempt < 4)
+            {
+                Thread.Sleep(50);
+            }
+            catch (Exception ex)
+            {
+                ExtensionLogger.Warn("changes", $"Watcher read failed for {path}: {ex.Message}");
+                return null;
+            }
+        }
+        ExtensionLogger.Warn("changes", $"Watcher read gave up (locked) for {path}");
+        return null;
     }
 
     string MakeDisplay(string absolute)
