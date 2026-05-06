@@ -20,7 +20,16 @@ public sealed class HunkOperationsTests : IDisposable
     {
         _workspace = Path.Combine(Path.GetTempPath(), "ChatRelayHunkTests_" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_workspace);
-        _tracker = new ChangeTracker { WorkspaceRoot = _workspace };
+        // EnableFileSystemWatcher MUST be set before WorkspaceRoot — the
+        // workspace setter is what triggers RebuildWatcher. Tests call
+        // OnExternalFileChange directly; leaving the watcher running
+        // would race against the test's synchronous WriteWithRetry,
+        // catching partial-disk reads and corrupting tracker state.
+        _tracker = new ChangeTracker
+        {
+            EnableFileSystemWatcher = false,
+            WorkspaceRoot = _workspace,
+        };
     }
 
     public void Dispose()

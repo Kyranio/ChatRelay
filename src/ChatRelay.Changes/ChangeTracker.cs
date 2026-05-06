@@ -52,11 +52,33 @@ public sealed class ChangeTracker
     }
     string? _workspaceRoot;
     WorkspaceWatcher? _watcher;
+    bool _enableFileSystemWatcher = true;
+
+    /// <summary>
+    /// Controls whether <see cref="WorkspaceRoot"/> spins up the
+    /// background <see cref="WorkspaceWatcher"/>. Default true. Tests
+    /// set this to false before assigning <see cref="WorkspaceRoot"/>
+    /// so they don't race against the watcher firing partial-read
+    /// events during synchronous file writes — the test path calls
+    /// <see cref="OnExternalFileChange"/> directly anyway, so the
+    /// watcher would only add noise.
+    /// </summary>
+    public bool EnableFileSystemWatcher
+    {
+        get => _enableFileSystemWatcher;
+        set
+        {
+            if (_enableFileSystemWatcher == value) return;
+            _enableFileSystemWatcher = value;
+            RebuildWatcher();
+        }
+    }
 
     void RebuildWatcher()
     {
         try { _watcher?.Dispose(); } catch { }
         _watcher = null;
+        if (!_enableFileSystemWatcher) return;
         if (string.IsNullOrEmpty(_workspaceRoot))
         {
             ExtensionLogger.Info("changes", "Watcher not started: workspace root is empty");

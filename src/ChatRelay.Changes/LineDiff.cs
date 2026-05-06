@@ -262,15 +262,28 @@ public static class LineDiff
             && content[startOffset - 1] != '\n';
         if (needsLeadingNewline) sb.Append(newline);
 
+        // Trailing-newline preservation: if the splice consumes the final
+        // line(s) of the file AND the original ended with a newline, the
+        // result must end with one too — otherwise downstream byte-equality
+        // checks (FileTracker.HasProposal) flag a non-existent diff while
+        // ComputeHunks correctly sees identical line arrays. The earlier
+        // version skipped the trailing newline whenever endOffset reached
+        // content.Length, dropping the final '\n' from files that started
+        // with one.
+        bool originalEndsWithNewline = content.Length > 0
+            && content[content.Length - 1] == '\n';
+
         for (int i = 0; i < newLines.Count; i++)
         {
             sb.Append(newLines[i]);
-            // Add a newline after each new line UNLESS this is the last new
-            // line AND there's no content after the splice point. Matches
-            // the original file's "trailing newline yes/no" choice.
             bool isLast = i == newLines.Count - 1;
-            if (!isLast || endOffset < content.Length)
-                sb.Append(newline);
+            // Inner newlines: always. Last one: append iff there's content
+            // after the splice (the next line's separator) OR the original
+            // ended with a newline that we'd otherwise lose.
+            bool needTrailing = !isLast
+                || endOffset < content.Length
+                || originalEndsWithNewline;
+            if (needTrailing) sb.Append(newline);
         }
 
         sb.Append(content, endOffset, content.Length - endOffset);

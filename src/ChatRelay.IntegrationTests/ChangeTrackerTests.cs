@@ -13,10 +13,10 @@ namespace ChatRelay.IntegrationTests;
 /// <para>
 /// Each test gets its own unique temp directory as the workspace root so
 /// the per-test <c>FileSystemWatcher</c> instances can't interfere. The
-/// watcher does fire real OS events for our test-driven file writes, but
-/// its callback is idempotent (it just re-checks state under the same
-/// session lock our explicit calls take) so background events arriving
-/// out of order remain harmless.
+/// watcher itself is disabled in the fixture — tests call
+/// <c>OnExternalFileChange</c> directly, and a live watcher would race
+/// against synchronous test writes, occasionally catching mid-flush
+/// partial reads that corrupt the tracker state.
 /// </para>
 /// </summary>
 public sealed class ChangeTrackerTests : IDisposable
@@ -29,7 +29,11 @@ public sealed class ChangeTrackerTests : IDisposable
     {
         _workspace = Path.Combine(Path.GetTempPath(), "ChatRelayTests_" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_workspace);
-        _tracker = new ChangeTracker { WorkspaceRoot = _workspace };
+        _tracker = new ChangeTracker
+        {
+            EnableFileSystemWatcher = false,
+            WorkspaceRoot = _workspace,
+        };
     }
 
     public void Dispose()
