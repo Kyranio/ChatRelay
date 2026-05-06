@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading.Tasks;
 using ChatRelay.Host;
 
 namespace ChatRelay.Editor;
@@ -32,6 +33,24 @@ public sealed class EditorChangesService
     readonly object _sync = new();
     readonly Dictionary<string, IReadOnlyList<HunkInfo>> _hunksByPath
         = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Session id from the most recent snapshot ingested. The editor
+    /// adornment uses this when relaying accept/reject button clicks
+    /// back to the host — the host's per-hunk RPCs are session-scoped.
+    /// </summary>
+    public string? CurrentSessionId { get; private set; }
+
+    /// <summary>
+    /// Sent by ChatViewModel at host-startup time. Editor adornments
+    /// invoke this to forward an accept-hunk click without needing
+    /// their own HostClient reference. Args: sessionId, filePath,
+    /// baselineStart, baselineCount.
+    /// </summary>
+    public Func<string, string, int, int, Task>? AcceptHunkAsync { get; set; }
+
+    /// <summary>Like <see cref="AcceptHunkAsync"/> but for reject clicks.</summary>
+    public Func<string, string, int, int, Task>? RejectHunkAsync { get; set; }
 
     /// <summary>
     /// Fires when the hunk list for the given absolute path changes —
@@ -68,6 +87,8 @@ public sealed class EditorChangesService
     public void Update(SessionChangesSnapshot snapshot)
     {
         if (snapshot is null) return;
+
+        CurrentSessionId = snapshot.SessionId;
 
         var changedPaths = new List<string>();
         lock (_sync)

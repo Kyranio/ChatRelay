@@ -194,6 +194,18 @@ public sealed class ChatViewModel : INotifyPropertyChanged
         await Host.InitializeAsync(initialWorkspace);
         await UiThread.SwitchToUi();
         await RefreshModelsAsync();
+
+        // Wire the editor adornment's accept/reject buttons to host RPCs
+        // via EditorChangesService. The MEF-instantiated editor managers
+        // don't share a constructor with this VM, so they reach into the
+        // service for the per-hunk round-trip rather than holding their
+        // own HostClient reference.
+        var svc = Editor.EditorChangesService.Current;
+        svc.AcceptHunkAsync = (sid, path, bs, bc) =>
+            Host?.AcceptHunkAsync(sid, path, bs, bc) ?? Task.CompletedTask;
+        svc.RejectHunkAsync = (sid, path, bs, bc) =>
+            Host?.RejectHunkAsync(sid, path, bs, bc) ?? Task.CompletedTask;
+
         // Sessions are NOT loaded here — they happen in
         // LoadSessionsInBackgroundAsync after the view drops the loading
         // overlay. "Ready" = host alive + models populated + home shown.
