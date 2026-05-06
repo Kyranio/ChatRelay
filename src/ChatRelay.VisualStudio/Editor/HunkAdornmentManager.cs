@@ -53,10 +53,26 @@ sealed class HunkAdornmentManager
     readonly IAdornmentLayer? _layer;
     readonly IAdornmentLayer? _overlay;
 
-    // Last hunk list we received from the service, kept so we can re-render
-    // on LayoutChanged without re-querying. Empty list while we have nothing
-    // to show.
-    IReadOnlyList<HunkInfo> _hunks = Array.Empty<HunkInfo>();
+    // Last hunk list we received from the service, paired with an
+    // ITrackingSpan over each hunk's current line range. The tracking
+    // span lets the highlight + buttons follow the user's typing live —
+    // VS auto-translates the span across buffer edits, so the next
+    // render reads the up-to-date coords without waiting for a save.
+    //
+    // LocallyInvalidated covers the "drop accepted marker on first
+    // touch" rule: when the user types within an accepted hunk's
+    // tracked range we set the bit, hide the marker immediately, and
+    // fire an invalidate RPC so the next host snapshot agrees.
+    readonly List<TrackedHunk> _tracked = new();
+
+    // Plain mutable settable properties — net48 doesn't have init/required
+    // without polyfill attributes.
+    sealed class TrackedHunk
+    {
+        public HunkInfo Info { get; set; } = null!;
+        public ITrackingSpan Span { get; set; } = null!;
+        public bool LocallyInvalidated { get; set; }
+    }
 
     public HunkAdornmentManager(IWpfTextView view)
     {
@@ -80,31 +96,134 @@ sealed class HunkAdornmentManager
         _service.HunksChanged += OnHunksChanged;
         _view.Closed += OnViewClosed;
         _view.LayoutChanged += OnLayoutChanged;
+        _view.TextBuffer.Changed += OnBufferChanged;
 
         // Pick up any hunks already known (the snapshot may have arrived
         // before the editor view opened).
-        _hunks = _service.GetHunks(_filePath);
-        if (_hunks.Count > 0) RenderHunks();
+        RebuildTrackedFromService();
+        if (_tracked.Count > 0) RenderHunks();
     }
 
     void OnHunksChanged(string changedPath)
     {
         if (_filePath is null) return;
         if (!string.Equals(changedPath, _filePath, StringComparison.OrdinalIgnoreCase)) return;
-        _hunks = _service.GetHunks(_filePath);
-        Debug.WriteLine($"[ChatRelay.editor] Hunks for {_filePath}: {_hunks.Count} hunk(s)");
+        RebuildTrackedFromService();
+        Debug.WriteLine($"[ChatRelay.editor] Hunks for {_filePath}: {_tracked.Count} hunk(s)");
         RenderHunks();
     }
 
     void OnLayoutChanged(object? sender, TextViewLayoutChangedEventArgs e)
     {
         // Re-render on every layout change so adornments follow scroll,
-        // resize, and text edits. Phase 4.4 will refine this to re-anchor
-        // hunks against the live buffer (handling user typing inside the
-        // hunk's region); for 4.3 we simply redraw at the snapshot's
-        // current line numbers.
-        if (_hunks.Count == 0) return;
+        // resize, and text edits. Buffer edits also reach us here; the
+        // tracking spans built in RebuildTrackedFromService auto-translate
+        // across snapshots, so the render at this point uses live coords.
+        if (_tracked.Count == 0) return;
         RenderHunks();
+    }
+
+    void OnBufferChanged(object? sender, TextContentChangedEventArgs e)
+    {
+        // The watcher / host snapshot path can't see in-buffer edits
+        // until the user saves. We do two things on every change:
+        //   • Detect intersections with accepted-hunk tracked spans →
+        //     drop those markers locally and tell the host so the next
+        //     snapshot agrees.
+        //   • Don't bother re-rendering open hunks here; the tracking
+        //     spans auto-grow and OnLayoutChanged already fires for
+        //     buffer edits, so the next render uses the live coords.
+        if (_tracked.Count == 0) return;
+
+        var snapshot = e.After;
+        foreach (var t in _tracked)
+        {
+            if (t.LocallyInvalidated) continue;
+            if (!string.Equals(t.Info.State, "accepted", StringComparison.Ordinal)) continue;
+
+            var current = t.Span.GetSpan(snapshot);
+            // Any change within the tracked region invalidates the marker.
+            // ITextChange.NewSpan is in the after-snapshot — direct compare.
+            bool intersects = false;
+            foreach (var change in e.Changes)
+            {
+                if (change.NewSpan.OverlapsWith(current.Span)
+                    || change.NewSpan.IntersectsWith(current.Span))
+                {
+                    intersects = true;
+                    break;
+                }
+            }
+            if (!intersects) continue;
+
+            t.LocallyInvalidated = true;
+            FireInvalidateAcceptedHunk(t.Info);
+        }
+    }
+
+    void FireInvalidateAcceptedHunk(HunkInfo h)
+    {
+        var sid = _service.CurrentSessionId;
+        var op = _service.InvalidateAcceptedHunkAsync;
+        if (sid is null || op is null || _filePath is null) return;
+        // Fire-and-forget — host catches up on its next snapshot. Wrap
+        // in a Task so JsonRpc exceptions don't bubble onto the UI thread.
+        _ = System.Threading.Tasks.Task.Run(async () =>
+        {
+            try { await op(sid, _filePath, h.BaselineStart, h.BaselineCount); }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[ChatRelay.editor] InvalidateAcceptedHunk failed: {ex.Message}");
+            }
+        });
+    }
+
+    void RebuildTrackedFromService()
+    {
+        _tracked.Clear();
+        if (_filePath is null) return;
+        var hunks = _service.GetHunks(_filePath);
+        if (hunks.Count == 0) return;
+
+        var snapshot = _view.TextSnapshot;
+        foreach (var h in hunks)
+        {
+            var span = TryBuildTrackingSpan(h, snapshot);
+            if (span is null) continue;
+            _tracked.Add(new TrackedHunk { Info = h, Span = span! });
+        }
+    }
+
+    // Builds an EdgeInclusive tracking span covering the hunk's current
+    // line range. EdgeInclusive matters: the user inserting a newline at
+    // the boundary of the hunk should grow the tracked region (so the
+    // highlight follows). Pure-deletion hunks (CurrentCount=0) get a
+    // zero-width span at the join-point so we can still anchor a UI to
+    // them, but they aren't candidates for "intersected by typing"
+    // since there's nothing to type inside.
+    static ITrackingSpan? TryBuildTrackingSpan(HunkInfo h, ITextSnapshot snapshot)
+    {
+        try
+        {
+            if (h.CurrentCount > 0
+                && h.CurrentStart >= 0
+                && h.CurrentStart + h.CurrentCount <= snapshot.LineCount)
+            {
+                var first = snapshot.GetLineFromLineNumber(h.CurrentStart);
+                var last = snapshot.GetLineFromLineNumber(h.CurrentStart + h.CurrentCount - 1);
+                return snapshot.CreateTrackingSpan(
+                    new SnapshotSpan(first.Start, last.End),
+                    SpanTrackingMode.EdgeInclusive);
+            }
+            // Pure deletion — zero-width anchor at the join-point.
+            int anchorLine = Math.Max(0, Math.Min(h.CurrentStart, snapshot.LineCount - 1));
+            var line = snapshot.GetLineFromLineNumber(anchorLine);
+            return snapshot.CreateTrackingSpan(new SnapshotSpan(line.Start, 0), SpanTrackingMode.EdgeExclusive);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     void RenderHunks()
@@ -114,14 +233,20 @@ sealed class HunkAdornmentManager
         _overlay?.RemoveAllAdornments();
 
         var snapshot = _view.TextSnapshot;
-        foreach (var h in _hunks)
+        foreach (var t in _tracked)
         {
+            // Skip accepted hunks the user has typed into. The marker is
+            // suppressed locally until the next snapshot (which the host
+            // RPC will re-classify as open).
+            if (t.LocallyInvalidated) continue;
+
             try
             {
-                if (string.Equals(h.State, "accepted", StringComparison.Ordinal))
-                    RenderAcceptedHunk(h, snapshot);
+                var live = t.Span.GetSpan(snapshot);
+                if (string.Equals(t.Info.State, "accepted", StringComparison.Ordinal))
+                    RenderAcceptedHunk(t.Info, live, snapshot);
                 else
-                    RenderOpenHunk(h, snapshot);
+                    RenderOpenHunk(t.Info, live, snapshot);
             }
             catch (Exception ex)
             {
@@ -130,27 +255,23 @@ sealed class HunkAdornmentManager
         }
     }
 
-    void RenderAcceptedHunk(HunkInfo h, ITextSnapshot snapshot)
+    void RenderAcceptedHunk(HunkInfo h, SnapshotSpan span, ITextSnapshot snapshot)
     {
         if (_layer is null) return;
         // Accepted hunk marker:
         //   - thin turquoise vertical bar in the left margin of the lines
-        //     the model produced
+        //     the model produced (positioned via the live tracking span,
+        //     so it follows the user's edits around it)
         //   - tooltip "Edited by {Model}" — model resolved from the hunk's
         //     Model field (carried on the wire by Phase 4.3a)
         //   - reject (↶) button below the region so the user can still
         //     change their mind from inside the editor
-        if (h.CurrentCount <= 0
-            || h.CurrentStart < 0
-            || h.CurrentStart + h.CurrentCount > snapshot.LineCount)
-            return;
+        if (span.Length <= 0) return;
 
-        var firstLine = snapshot.GetLineFromLineNumber(h.CurrentStart);
-        var lastLine = snapshot.GetLineFromLineNumber(h.CurrentStart + h.CurrentCount - 1);
-        var span = new SnapshotSpan(firstLine.Start, lastLine.End);
-
-        var firstView = _view.TextViewLines.GetTextViewLineContainingBufferPosition(firstLine.Start);
-        var lastView = _view.TextViewLines.GetTextViewLineContainingBufferPosition(lastLine.Start);
+        var firstView = _view.TextViewLines.GetTextViewLineContainingBufferPosition(span.Start);
+        // span.End-1 keeps us on the last actual line, not the next one.
+        var lastPos = span.End > span.Start ? span.End - 1 : span.End;
+        var lastView = _view.TextViewLines.GetTextViewLineContainingBufferPosition(lastPos);
         if (firstView is null || lastView is null) return;
 
         var modelLabel = string.IsNullOrEmpty(h.Model)
@@ -193,26 +314,21 @@ sealed class HunkAdornmentManager
             span, AdornmentTagFor(h, "accepted-reject"), row, null);
     }
 
-    void RenderOpenHunk(HunkInfo h, ITextSnapshot snapshot)
+    void RenderOpenHunk(HunkInfo h, SnapshotSpan span, ITextSnapshot snapshot)
     {
         if (_layer is null) return;
 
         // ---- 1. Highlight rectangle behind the new lines (when any) -----
         double belowY;       // Y to position the expander + buttons row
 
-        if (h.CurrentCount > 0
-            && h.CurrentStart >= 0
-            && h.CurrentStart + h.CurrentCount <= snapshot.LineCount)
+        if (span.Length > 0)
         {
-            var firstLine = snapshot.GetLineFromLineNumber(h.CurrentStart);
-            var lastLine = snapshot.GetLineFromLineNumber(h.CurrentStart + h.CurrentCount - 1);
-            var span = new SnapshotSpan(firstLine.Start, lastLine.End);
-
-            // Geometry only exists for lines currently in the formatted
-            // view region — off-screen hunks return null. That's fine,
-            // they re-render when the user scrolls them in.
-            var firstView = _view.TextViewLines.GetTextViewLineContainingBufferPosition(firstLine.Start);
-            var lastView = _view.TextViewLines.GetTextViewLineContainingBufferPosition(lastLine.Start);
+            // Live span from the tracking-span gives us the user's
+            // typed-into region too, so the highlight grows immediately
+            // — no save required.
+            var firstView = _view.TextViewLines.GetTextViewLineContainingBufferPosition(span.Start);
+            var lastPos = span.End > span.Start ? span.End - 1 : span.End;
+            var lastView = _view.TextViewLines.GetTextViewLineContainingBufferPosition(lastPos);
             if (firstView is not null && lastView is not null)
             {
                 var rect = new Rectangle
@@ -238,25 +354,13 @@ sealed class HunkAdornmentManager
         }
         else
         {
-            // Pure deletion: anchor the panel where the deletion happened.
-            // CurrentStart is the line that follows what was deleted.
-            int anchorLine = Math.Max(0, Math.Min(h.CurrentStart, snapshot.LineCount - 1));
-            var line = snapshot.GetLineFromLineNumber(anchorLine);
-            var view = _view.TextViewLines.GetTextViewLineContainingBufferPosition(line.Start);
+            // Pure deletion: anchor the panel at the join-point line.
+            var view = _view.TextViewLines.GetTextViewLineContainingBufferPosition(span.Start);
             if (view is null) return;
             belowY = view.Top;
         }
 
-        // ---- 2. Below the highlight: expander + buttons in one horizontal
-        //         row anchored at the viewport's left. Keeping the buttons
-        //         next to the expander (rather than pinned right) means
-        //         users on ultrawide displays don't have to scan the entire
-        //         line width to find them. VerticalAlignment.Top on the
-        //         button row keeps them aligned with the expander header
-        //         even when the expander is open.
-
-        var anchorSpan = new SnapshotSpan(
-            snapshot.GetLineFromLineNumber(Math.Max(0, h.CurrentStart)).Start, 0);
+        var anchorSpan = new SnapshotSpan(span.Start, 0);
 
         var combined = new StackPanel
         {
@@ -476,6 +580,7 @@ sealed class HunkAdornmentManager
         _service.HunksChanged -= OnHunksChanged;
         _view.Closed -= OnViewClosed;
         _view.LayoutChanged -= OnLayoutChanged;
+        _view.TextBuffer.Changed -= OnBufferChanged;
     }
 
     static string? ResolveFilePath(IWpfTextView view)

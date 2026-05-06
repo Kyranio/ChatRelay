@@ -390,6 +390,40 @@ public sealed class HunkOperationsTests : IDisposable
     }
 
     [Fact]
+    public void InvalidateAcceptedHunk_drops_marker_so_next_snapshot_reports_open()
+    {
+        // Editor-side path: user types in an accepted hunk before saving.
+        // The watcher can't see in-buffer typing, so the editor pushes
+        // an explicit invalidation; the host should drop the key from
+        // AcceptedHunks and the next snapshot must classify the hunk
+        // as "open".
+        var path = MakeFile("foo.cs", "a\nb\nc\n");
+        EditCycle(path, "a\nB\nc\n");
+        var firstHunk = _tracker.Snapshot(SessionId).Proposals[0].Hunks[0];
+        Assert.True(_tracker.AcceptHunk(SessionId, path, firstHunk.BaselineStart, firstHunk.BaselineCount));
+        Assert.Equal("accepted", _tracker.Snapshot(SessionId).Proposals[0].Hunks[0].State);
+
+        Assert.True(_tracker.InvalidateAcceptedHunk(SessionId, path, firstHunk.BaselineStart, firstHunk.BaselineCount));
+
+        var p = _tracker.Snapshot(SessionId).Proposals[0];
+        Assert.Equal("open", p.State);
+        Assert.Equal("open", p.Hunks[0].State);
+        // Disk untouched — invalidation only flips the bookkeeping.
+        Assert.Equal("a\nB\nc\n", File.ReadAllText(path));
+    }
+
+    [Fact]
+    public void InvalidateAcceptedHunk_is_noop_for_unknown_hunk()
+    {
+        var path = MakeFile("foo.cs", "a\nb\nc\n");
+        EditCycle(path, "a\nB\nc\n");
+        // Hunk wasn't accepted yet — invalidation has nothing to drop.
+        Assert.False(_tracker.InvalidateAcceptedHunk(SessionId, path, 1, 1));
+        // Coordinates that don't match any hunk → also no-op.
+        Assert.False(_tracker.InvalidateAcceptedHunk(SessionId, path, 99, 99));
+    }
+
+    [Fact]
     public void External_edit_with_no_proposal_still_drops_tracker_entry()
     {
         // Ensure we didn't break the Phase 3.1 case: an external edit on

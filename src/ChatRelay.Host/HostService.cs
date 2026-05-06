@@ -447,6 +447,13 @@ public sealed class HostService
         return Task.CompletedTask;
     }
 
+    [JsonRpcMethod("invalidateAcceptedHunk", UseSingleObjectParameterDeserialization = true)]
+    public Task InvalidateAcceptedHunkAsync(InvalidateAcceptedHunkParams p)
+    {
+        _changes.InvalidateAcceptedHunk(p.SessionId, p.FilePath, p.BaselineStart, p.BaselineCount);
+        return Task.CompletedTask;
+    }
+
     [JsonRpcMethod("redoDeniedChange", UseSingleObjectParameterDeserialization = true)]
     public Task RedoDeniedChangeAsync(RedoDeniedChangeParams p)
     {

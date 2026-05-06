@@ -152,4 +152,12 @@ public record BulkChangesParams(string SessionId);
 public record AcceptHunkParams(string SessionId, string FilePath, int BaselineStart, int BaselineCount);
 public record RejectHunkParams(string SessionId, string FilePath, int BaselineStart, int BaselineCount);
 
+// Editor-side invalidation: the user has typed inside an accepted hunk's
+// current line range, so its accept-marker should drop in the snapshot.
+// Sent before the user has saved — the host can't infer this from the
+// watcher because the buffer change hasn't reached disk yet. Coordinates
+// match the same shape as Accept/Reject so the host can locate the hunk
+// against the current diff.
+public record InvalidateAcceptedHunkParams(string SessionId, string FilePath, int BaselineStart, int BaselineCount);
+
 public record ChangesUpdatedEvent(SessionChangesSnapshot Snapshot);

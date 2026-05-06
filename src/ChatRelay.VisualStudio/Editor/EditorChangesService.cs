@@ -53,6 +53,14 @@ public sealed class EditorChangesService
     public Func<string, string, int, int, Task>? RejectHunkAsync { get; set; }
 
     /// <summary>
+    /// Editor-initiated invalidation of an accepted hunk's marker. Fired
+    /// when the user types within an accepted hunk's tracked line range —
+    /// the buffer change hasn't reached disk yet, but the marker should
+    /// drop immediately. Same arg shape as the accept/reject callbacks.
+    /// </summary>
+    public Func<string, string, int, int, Task>? InvalidateAcceptedHunkAsync { get; set; }
+
+    /// <summary>
     /// Fires when the hunk list for the given absolute path changes —
     /// either updated, replaced, or cleared (file no longer in any
     /// proposal). Subscribers filter on the path argument; we don't

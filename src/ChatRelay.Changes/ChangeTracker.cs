@@ -272,6 +272,38 @@ public sealed class ChangeTracker
         return changed;
     }
 
+    /// <summary>
+    /// Drops the accept-marker for one hunk, identified by baseline
+    /// coordinates. Sent by the editor when the user types inside an
+    /// accepted hunk's current line range — the buffer change hasn't hit
+    /// disk yet, so the watcher path can't infer it. Removes the matching
+    /// key from <see cref="FileTracker.AcceptedHunks"/> and re-derives
+    /// <c>Accepted</c>; the next snapshot reports the hunk as "open".
+    /// No-op if the file isn't tracked, the hunk doesn't exist, or it
+    /// wasn't accepted in the first place.
+    /// </summary>
+    public bool InvalidateAcceptedHunk(string sessionId, string filePath, int baselineStart, int baselineCount)
+    {
+        var s = GetOrCreate(sessionId);
+        bool changed = false;
+        lock (s.Sync)
+        {
+            if (!s.Files.TryGetValue(NormalisePath(filePath), out var f)) return false;
+
+            var hunks = LineDiff.ComputeHunks(f.Baseline, f.LastApplied);
+            var hunkOpt = FindHunkByCoords(hunks, baselineStart, baselineCount);
+            if (hunkOpt is null) return false;
+            var key = MakeKey(hunkOpt.Value);
+            if (!f.AcceptedHunks.Remove(key)) return false;
+
+            f.Accepted = ApplyAcceptedHunks(f);
+            f.IsAccepted = false;
+            changed = true;
+        }
+        if (changed) FireNotify(sessionId);
+        return changed;
+    }
+
     // Coordinate-only lookup for the wire-dispatched accept/reject RPCs:
     // the shell only sends (BaselineStart, BaselineCount), so we locate
     // the hunk by those alone and build the full HunkKey (including

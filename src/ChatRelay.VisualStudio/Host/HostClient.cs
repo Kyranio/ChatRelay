@@ -145,6 +145,10 @@ public sealed class HostClient : IDisposable
         _rpc.InvokeWithParameterObjectAsync("rejectHunk",
             new RejectHunkParams(sessionId, filePath, baselineStart, baselineCount));
 
+    public Task InvalidateAcceptedHunkAsync(string sessionId, string filePath, int baselineStart, int baselineCount) =>
+        _rpc.InvokeWithParameterObjectAsync("invalidateAcceptedHunk",
+            new InvalidateAcceptedHunkParams(sessionId, filePath, baselineStart, baselineCount));
+
     public Task RedoDeniedChangeAsync(string sessionId, string filePath, string denialId) =>
         _rpc.InvokeWithParameterObjectAsync("redoDeniedChange", new RedoDeniedChangeParams(sessionId, filePath, denialId));
 

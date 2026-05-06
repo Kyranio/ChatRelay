@@ -205,6 +205,8 @@ public sealed class ChatViewModel : INotifyPropertyChanged
             Host?.AcceptHunkAsync(sid, path, bs, bc) ?? Task.CompletedTask;
         svc.RejectHunkAsync = (sid, path, bs, bc) =>
             Host?.RejectHunkAsync(sid, path, bs, bc) ?? Task.CompletedTask;
+        svc.InvalidateAcceptedHunkAsync = (sid, path, bs, bc) =>
+            Host?.InvalidateAcceptedHunkAsync(sid, path, bs, bc) ?? Task.CompletedTask;
 
         // Sessions are NOT loaded here — they happen in
         // LoadSessionsInBackgroundAsync after the view drops the loading
