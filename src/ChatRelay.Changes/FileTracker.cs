@@ -56,6 +56,16 @@ public sealed class FileTracker
 
     /// <summary>True iff the current proposal is meaningful (something has changed since baseline).</summary>
     public bool HasProposal => !string.Equals(Baseline, LastApplied, StringComparison.Ordinal);
+
+    /// <summary>
+    /// Set true between a tool_use observation and its matching tool_result.
+    /// During this window the model's write may already have hit disk and
+    /// been picked up by <see cref="WorkspaceWatcher"/> before our own
+    /// <c>UpdateLastApplied</c> caught up — the tracker would mis-classify
+    /// it as an external edit and clobber state. Honoring this flag in the
+    /// watcher path skips that misfire.
+    /// </summary>
+    public bool ExpectingWrite { get; set; }
 }
 
 /// <summary>

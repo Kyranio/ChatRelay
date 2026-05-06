@@ -325,7 +325,39 @@ public sealed class ChangeTracker
     void EnsureBaselineLocked(SessionState s, string absolute)
     {
         var key = NormalisePath(absolute);
-        if (s.Files.ContainsKey(key)) return;   // already tracking — preserve original baseline
+        if (s.Files.TryGetValue(key, out var existing))
+        {
+            // Already tracking. Two sub-cases:
+            //  (a) ExpectingWrite — a previous tool_use this turn already
+            //      flagged us; nothing to do beyond keeping the flag set.
+            //  (b) Disk has drifted since we last observed it (user edited
+            //      between turns and the watcher hasn't caught up yet — or
+            //      the file was racy enough that EnsureBaseline arrived
+            //      first). Treat that as a fresh-start checkpoint: reset
+            //      Baseline to current disk so this turn's diff captures
+            //      the user's intermediate work as the starting point,
+            //      and drop any leftover denials (they referenced an
+            //      obsolete on-disk state).
+            if (!existing.ExpectingWrite)
+            {
+                string? current = TryRead(absolute);
+                if (current is not null
+                    && !string.Equals(current, existing.LastApplied, StringComparison.Ordinal)
+                    && !string.Equals(current, existing.Baseline, StringComparison.Ordinal))
+                {
+                    ExtensionLogger.Info("changes",
+                        $"Refreshing Baseline for {absolute} — disk drifted before tool_use");
+                    existing.Baseline = current;
+                    existing.Accepted = current;
+                    existing.LastApplied = current;
+                    existing.IsAccepted = false;
+                    existing.Denied.Clear();
+                }
+            }
+            existing.ExpectingWrite = true;
+            return;
+        }
+
         string baseline = string.Empty;
         if (File.Exists(absolute))
         {
@@ -343,7 +375,14 @@ public sealed class ChangeTracker
             Baseline = baseline,
             Accepted = baseline,         // nothing accepted yet
             LastApplied = baseline,      // pre-write — model hasn't run yet
+            ExpectingWrite = true,       // tool will write between now and tool_result
         };
+    }
+
+    static string? TryRead(string path)
+    {
+        try { return File.Exists(path) ? File.ReadAllText(path) : string.Empty; }
+        catch { return null; }
     }
 
     void UpdateLastAppliedLocked(SessionState s, string absolute)
@@ -356,6 +395,8 @@ public sealed class ChangeTracker
             // least don't crash; user-facing diff will be 0/0 until the
             // next observed write.
             EnsureBaselineLocked(s, absolute);
+            if (s.Files.TryGetValue(key, out f))
+                f.ExpectingWrite = false;
             return;
         }
         try
@@ -366,6 +407,10 @@ public sealed class ChangeTracker
         {
             ExtensionLogger.Warn("changes", $"Post-write read failed for {absolute}: {ex.Message}");
         }
+        // Tool finished — disk is post-write, the watcher's content-match
+        // check (against LastApplied) will correctly identify subsequent
+        // events for this file as our own writes.
+        f.ExpectingWrite = false;
         // Subsequent model edit invalidates any prior denial whose post-deny
         // disk state no longer matches reality. Per spec: "Once the file is
         // modified ... the removed changes will be cleared from the session
@@ -405,6 +450,16 @@ public sealed class ChangeTracker
                 if (!session.Files.TryGetValue(key, out var f)) continue;
                 anyTracked = true;
 
+                // Tool just emitted a use-event but tool_result hasn't
+                // arrived to update LastApplied — the on-disk write is the
+                // model's, not the user's. Skip so we don't mis-classify it
+                // as external and clobber state.
+                if (f.ExpectingWrite)
+                {
+                    ExtensionLogger.Debug("changes", $"Watcher echo (ExpectingWrite): {absolutePath}");
+                    continue;
+                }
+
                 // Disk matches a clean state we know about → echo of our own
                 // write or a no-op (e.g. tool that touched but didn't modify).
                 // Don't disturb any denial entries.
@@ -426,7 +481,23 @@ public sealed class ChangeTracker
                     d => !string.Equals(d.DiskContentAtDeny, content, StringComparison.Ordinal));
                 ExtensionLogger.Info("changes",
                     $"External edit on {absolutePath}: dropped {removed}/{before} denial(s)");
-                if (removed > 0) changedSessions.Add(kv.Key);
+
+                // If the file no longer has a meaningful tracker state
+                // (no open/accepted proposal AND no surviving denials),
+                // drop the entry entirely. Without this, a later Claude
+                // edit would diff against the obsolete pre-user-edit
+                // Baseline — making the user's removed lines invisible
+                // in the +N/−M counts.
+                bool entryDropped = false;
+                if (!f.HasProposal && f.Denied.Count == 0)
+                {
+                    session.Files.Remove(key);
+                    entryDropped = true;
+                    ExtensionLogger.Info("changes",
+                        $"Dropped tracker entry for {absolutePath} (clean state after external edit)");
+                }
+
+                if (removed > 0 || entryDropped) changedSessions.Add(kv.Key);
             }
         }
         if (!anyTracked)
