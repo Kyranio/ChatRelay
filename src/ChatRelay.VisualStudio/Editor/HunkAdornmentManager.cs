@@ -155,24 +155,27 @@ sealed class HunkAdornmentManager
     void OnBufferChanged(object? sender, TextContentChangedEventArgs e)
     {
         // The watcher / host snapshot path can't see in-buffer edits
-        // until the user saves. We do two things on every change:
-        //   • Detect intersections with accepted-hunk tracked spans →
-        //     drop those markers locally and tell the host so the next
-        //     snapshot agrees.
-        //   • Don't bother re-rendering open hunks here; the tracking
-        //     spans auto-grow and OnLayoutChanged already fires for
-        //     buffer edits, so the next render uses the live coords.
+        // until the user saves. Three concerns:
+        //   • Accepted hunks intersected by typing → drop the marker
+        //     locally and tell the host (folds the hunk into Baseline).
+        //   • Open hunks whose model new-lines have been undone /
+        //     backspaced out of the buffer → hide locally; the host
+        //     catches up on next save when LastApplied catches up to
+        //     disk and the diff naturally shrinks.
+        //   • Open hunks that simply grew or shrank due to typing
+        //     inside the hunk → no action; tracking spans already
+        //     follow.
         if (_tracked.Count == 0) return;
 
         var snapshot = e.After;
         foreach (var t in _tracked)
         {
             if (t.LocallyInvalidated) continue;
-            if (!string.Equals(t.Info.State, "accepted", StringComparison.Ordinal)) continue;
 
-            var current = t.Span.GetSpan(snapshot);
-            // Any change within the tracked region invalidates the marker.
-            // ITextChange.NewSpan is in the after-snapshot — direct compare.
+            SnapshotSpan current;
+            try { current = t.Span.GetSpan(snapshot); }
+            catch { continue; }
+
             bool intersects = false;
             foreach (var change in e.Changes)
             {
@@ -185,8 +188,24 @@ sealed class HunkAdornmentManager
             }
             if (!intersects) continue;
 
-            t.LocallyInvalidated = true;
-            FireInvalidateAcceptedHunk(t.Info);
+            // Open vs accepted have different invalidation rules.
+            if (string.Equals(t.Info.State, "accepted", StringComparison.Ordinal))
+            {
+                // Accepted: any touch drops the marker. Host RPC folds
+                // the hunk into Baseline.
+                t.LocallyInvalidated = true;
+                FireInvalidateAcceptedHunk(t.Info);
+                continue;
+            }
+
+            // Open: a touch is fine (typing inside the hunk is the
+            // normal case — span auto-grows). But if the touch removed
+            // ALL of the model's new lines from the tracked span — e.g.
+            // ctrl+Z, or the user selected the new code and pressed
+            // backspace — the hunk is obsolete and should disappear
+            // visually. The host's view will catch up on next save.
+            if (IsHunkObsolete(t, current))
+                t.LocallyInvalidated = true;
         }
 
         // Anchor line numbers may have shifted — refresh the line-transform
@@ -236,6 +255,39 @@ sealed class HunkAdornmentManager
         _inLayoutUpdate = true;
         try { _lineTransform.SetTopSpaces(map); }
         finally { _inLayoutUpdate = false; }
+    }
+
+    /// <summary>
+    /// True iff none of the model's new lines for this open hunk are
+    /// still present in its tracked span. Triggered by ctrl+Z fully
+    /// undoing the model's edit, by the user selecting the inserted
+    /// code and deleting it, or by any other edit that wipes the
+    /// model's content out of that region.
+    ///
+    /// <para>
+    /// Pure-deletion hunks (CurrentLines empty) skip — there's nothing
+    /// to check; their tracked span is zero-width at the join-point.
+    /// Pure-insertion hunks where the span has collapsed to zero
+    /// length are obviously obsolete (the inserted lines are gone).
+    /// </para>
+    /// </summary>
+    static bool IsHunkObsolete(TrackedHunk t, SnapshotSpan current)
+    {
+        if (t.Info.CurrentLines.Count == 0) return false;
+        if (current.Length == 0) return true;
+        string spanText;
+        try { spanText = current.GetText(); }
+        catch { return false; }
+        // Exact line match — substring would false-positive on common
+        // tokens. Splits on \r\n / \n / \r so we don't mis-match across
+        // newline styles.
+        var lines = spanText.Split(new[] { "\r\n", "\n", "\r" }, StringSplitOptions.None);
+        var lineSet = new HashSet<string>(lines, StringComparer.Ordinal);
+        foreach (var ml in t.Info.CurrentLines)
+        {
+            if (lineSet.Contains(ml)) return false;
+        }
+        return true;
     }
 
     void FireInvalidateAcceptedHunk(HunkInfo h)
@@ -565,6 +617,7 @@ sealed class HunkAdornmentManager
         var sid = _service.CurrentSessionId;
         var op = _service.AcceptHunkAsync;
         if (sid is null || op is null || _filePath is null) return;
+        TrySaveBuffer();
         try { await op(sid, _filePath, h.BaselineStart, h.BaselineCount); }
         catch (Exception ex) { Debug.WriteLine($"[ChatRelay.editor] AcceptHunk failed: {ex.Message}"); }
     }
@@ -574,8 +627,38 @@ sealed class HunkAdornmentManager
         var sid = _service.CurrentSessionId;
         var op = _service.RejectHunkAsync;
         if (sid is null || op is null || _filePath is null) return;
+        TrySaveBuffer();
         try { await op(sid, _filePath, h.BaselineStart, h.BaselineCount); }
         catch (Exception ex) { Debug.WriteLine($"[ChatRelay.editor] RejectHunk failed: {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// Persists the buffer to disk before accept/reject runs on the host.
+    /// Two reasons:
+    ///   • Without this, the host writes <c>Baseline</c> back over a file
+    ///     the editor still has dirty in-memory; VS prompts the user with
+    ///     "the file was modified externally — reload?" — annoying every
+    ///     time they hit ↶.
+    ///   • Saves the user's in-buffer typing into <c>LastApplied</c> so
+    ///     reject covers their edits along with the model's, and a
+    ///     subsequent redo restores the user's lines too.
+    /// No-op if the buffer isn't dirty or there's no <c>ITextDocument</c>
+    /// (transient buffers, peek windows, etc.).
+    /// </summary>
+    void TrySaveBuffer()
+    {
+        try
+        {
+            if (_view.TextBuffer.Properties.TryGetProperty<ITextDocument>(typeof(ITextDocument), out var doc)
+                && doc.IsDirty)
+            {
+                doc.Save();
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[ChatRelay.editor] save-before-action failed: {ex.Message}");
+        }
     }
 
     // 24×24 icon-only buttons — accept gets the brand turquoise, reject

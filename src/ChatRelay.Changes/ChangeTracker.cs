@@ -273,14 +273,34 @@ public sealed class ChangeTracker
     }
 
     /// <summary>
-    /// Drops the accept-marker for one hunk, identified by baseline
-    /// coordinates. Sent by the editor when the user types inside an
-    /// accepted hunk's current line range — the buffer change hasn't hit
-    /// disk yet, so the watcher path can't infer it. Removes the matching
-    /// key from <see cref="FileTracker.AcceptedHunks"/> and re-derives
-    /// <c>Accepted</c>; the next snapshot reports the hunk as "open".
+    /// Drops the accept-marker for one hunk and folds the model's accepted
+    /// content into <see cref="FileTracker.Baseline"/> so the hunk
+    /// disappears from the diff entirely — not re-classified as "open".
+    /// Sent by the editor when the user types inside an accepted hunk's
+    /// current line range.
+    ///
+    /// <para>
+    /// Why fold into Baseline rather than just drop the key: the user's
+    /// expectation when modifying an accepted region is "this is mine
+    /// now, stop tracking it." Re-opening would put accept/reject UI back
+    /// over the user's own typing — wrong. Splicing the hunk's
+    /// <c>NewLines</c> into Baseline at <c>(BaselineStart, BaselineCount)</c>
+    /// makes Baseline reflect what disk actually has (the model's
+    /// accepted content), so <c>diff(Baseline, LastApplied) = ∅</c> for
+    /// that region and nothing surfaces in the next snapshot.
+    /// </para>
+    ///
+    /// <para>
+    /// Other accepted hunks AFTER this one in baseline coords need their
+    /// <see cref="HunkKey.BaselineStart"/> shifted by
+    /// <c>(NewLines.Count - OldCount)</c> — Baseline just grew or shrank
+    /// by that much. Keys before the splice point are unaffected.
+    /// </para>
+    ///
+    /// <para>
     /// No-op if the file isn't tracked, the hunk doesn't exist, or it
-    /// wasn't accepted in the first place.
+    /// wasn't accepted.
+    /// </para>
     /// </summary>
     public bool InvalidateAcceptedHunk(string sessionId, string filePath, int baselineStart, int baselineCount)
     {
@@ -293,10 +313,40 @@ public sealed class ChangeTracker
             var hunks = LineDiff.ComputeHunks(f.Baseline, f.LastApplied);
             var hunkOpt = FindHunkByCoords(hunks, baselineStart, baselineCount);
             if (hunkOpt is null) return false;
-            var key = MakeKey(hunkOpt.Value);
+            var hunk = hunkOpt.Value;
+            var key = MakeKey(hunk);
             if (!f.AcceptedHunks.Remove(key)) return false;
 
+            // Splice the hunk's new-side content into Baseline at the
+            // hunk's baseline position. Baseline now matches what's on
+            // disk for this region.
+            f.Baseline = LineDiff.SpliceLines(f.Baseline, baselineStart, baselineCount, hunk.NewLines);
+
+            // Shift the BaselineStart of any other accepted hunks that
+            // sit AFTER the spliced region. delta = how many lines
+            // Baseline gained (or lost) by the splice.
+            int delta = hunk.NewLines.Count - hunk.OldCount;
+            if (delta != 0 && f.AcceptedHunks.Count > 0)
+            {
+                int boundary = baselineStart + baselineCount;
+                var shifted = new HashSet<HunkKey>();
+                foreach (var k in f.AcceptedHunks)
+                {
+                    shifted.Add(k.BaselineStart >= boundary
+                        ? new HunkKey(k.BaselineStart + delta, k.BaselineCount, k.NewContent)
+                        : k);
+                }
+                f.AcceptedHunks.Clear();
+                foreach (var k in shifted) f.AcceptedHunks.Add(k);
+            }
+
+            // Re-derive Accepted from the updated Baseline + remaining
+            // accepted hunks. Note: this hunk's contribution is already
+            // baked into Baseline, so it's not double-applied.
             f.Accepted = ApplyAcceptedHunks(f);
+            // If Baseline now equals LastApplied, no proposal remains —
+            // IsAccepted stays false (we don't auto-flag a vanished file
+            // as "accepted").
             f.IsAccepted = false;
             changed = true;
         }

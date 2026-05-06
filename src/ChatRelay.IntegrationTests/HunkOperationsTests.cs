@@ -390,26 +390,59 @@ public sealed class HunkOperationsTests : IDisposable
     }
 
     [Fact]
-    public void InvalidateAcceptedHunk_drops_marker_so_next_snapshot_reports_open()
+    public void InvalidateAcceptedHunk_folds_NewLines_into_Baseline_and_hunk_disappears()
     {
-        // Editor-side path: user types in an accepted hunk before saving.
-        // The watcher can't see in-buffer typing, so the editor pushes
-        // an explicit invalidation; the host should drop the key from
-        // AcceptedHunks and the next snapshot must classify the hunk
-        // as "open".
+        // User has accepted the model's edit, then types inside that
+        // region. The editor sends invalidate to drop the marker AND
+        // remove the hunk from memory — the user's expectation is
+        // "this is mine now, stop tracking". Implementation: splice
+        // the hunk's NewLines into Baseline so diff(Baseline, LastApplied)
+        // shows nothing for this region.
         var path = MakeFile("foo.cs", "a\nb\nc\n");
         EditCycle(path, "a\nB\nc\n");
         var firstHunk = _tracker.Snapshot(SessionId).Proposals[0].Hunks[0];
         Assert.True(_tracker.AcceptHunk(SessionId, path, firstHunk.BaselineStart, firstHunk.BaselineCount));
-        Assert.Equal("accepted", _tracker.Snapshot(SessionId).Proposals[0].Hunks[0].State);
 
         Assert.True(_tracker.InvalidateAcceptedHunk(SessionId, path, firstHunk.BaselineStart, firstHunk.BaselineCount));
 
-        var p = _tracker.Snapshot(SessionId).Proposals[0];
-        Assert.Equal("open", p.State);
-        Assert.Equal("open", p.Hunks[0].State);
-        // Disk untouched — invalidation only flips the bookkeeping.
+        var snap = _tracker.Snapshot(SessionId);
+        // No proposal at all — the hunk's contribution is now baked into
+        // Baseline so there's nothing to diff against LastApplied.
+        Assert.Empty(snap.Proposals);
+        // Disk untouched — invalidation is a tracker-side bookkeeping op.
         Assert.Equal("a\nB\nc\n", File.ReadAllText(path));
+    }
+
+    [Fact]
+    public void InvalidateAcceptedHunk_shifts_other_accepted_hunks_after_the_splice_point()
+    {
+        // Two accepted hunks at different baseline positions. Invalidating
+        // the FIRST one grows Baseline by (NewCount - OldCount) lines, so
+        // the SECOND hunk's BaselineStart needs to shift by that delta.
+        // Without the shift its key would no longer match the live diff
+        // and the snapshot would mis-classify it as "open".
+        var path = MakeFile("foo.cs", "a\nb\nc\nd\ne\n");
+        // Model adds two lines after "a" AND replaces "d" with "D".
+        EditCycle(path, "a\nA1\nA2\nb\nc\nD\ne\n");
+
+        var p = _tracker.Snapshot(SessionId).Proposals[0];
+        Assert.Equal(2, p.Hunks.Count);
+        // Accept BOTH.
+        foreach (var h in p.Hunks)
+            Assert.True(_tracker.AcceptHunk(SessionId, path, h.BaselineStart, h.BaselineCount));
+        Assert.All(_tracker.Snapshot(SessionId).Proposals[0].Hunks,
+            h => Assert.Equal("accepted", h.State));
+
+        // Invalidate the first (insertion at baseline 1, count 0). That
+        // grows Baseline by +2 lines, so the second hunk that was at
+        // baseline 3 should shift to baseline 5.
+        var first = p.Hunks[0];
+        Assert.True(_tracker.InvalidateAcceptedHunk(SessionId, path, first.BaselineStart, first.BaselineCount));
+
+        var p2 = Assert.Single(_tracker.Snapshot(SessionId).Proposals);
+        var stillThere = Assert.Single(p2.Hunks);
+        // Coord-shift verified: second hunk still classified accepted.
+        Assert.Equal("accepted", stillThere.State);
     }
 
     [Fact]
