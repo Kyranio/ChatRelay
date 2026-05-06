@@ -28,5 +28,11 @@
   </Prerequisites>
   <Assets>
     <Asset Type="Microsoft.VisualStudio.VsPackage" d:Source="Project" d:ProjectName="%CurrentProject%" Path="|%CurrentProject%;PkgdefProjectOutputGroup|" />
+    <!-- MefComponent asset so VS scans this assembly for MEF exports
+         (IWpfTextViewCreationListener, AdornmentLayerDefinition, etc.).
+         Without it the editor adornment hooks for hunk rendering simply
+         wouldn't fire — the package class would still load fine, but the
+         editor extensibility surface stays dark. -->
+    <Asset Type="Microsoft.VisualStudio.MefComponent" d:Source="Project" d:ProjectName="%CurrentProject%" Path="|%CurrentProject%|" />
   </Assets>
 </PackageManifest>

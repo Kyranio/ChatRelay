@@ -567,6 +567,12 @@ public sealed class ChatViewModel : INotifyPropertyChanged
         if (snapshot is null) return;
         if (_currentSession is null || snapshot.SessionId != _currentSession.Id) return;
         ApplySnapshot(snapshot);
+        // Fan out the same snapshot to editor-side consumers (Phase 4.2+).
+        // The editor MEF components subscribe to EditorChangesService and
+        // pick up per-file hunks from there, so they don't need their own
+        // RPC subscription. Chat-side and editor-side observe the same
+        // payload at the same time.
+        Editor.EditorChangesService.Current.Update(snapshot);
     }
 
     void ApplySnapshot(SessionChangesSnapshot snapshot)
@@ -672,6 +678,7 @@ public sealed class ChatViewModel : INotifyPropertyChanged
         {
             Proposals.Clear();
             Denials.Clear();
+            Editor.EditorChangesService.Current.ClearAll();
             return;
         }
         try
@@ -679,12 +686,18 @@ public sealed class ChatViewModel : INotifyPropertyChanged
             var snap = await Host.ListChangesAsync(_currentSession.Id);
             await UiThread.SwitchToUi();
             ApplySnapshot(snap);
+            // Sync editor cache to the new session's snapshot — without
+            // this, switching sessions would leave stale hunks visible
+            // in the editor view for files no longer in the current
+            // session's tracker.
+            Editor.EditorChangesService.Current.Update(snap);
         }
         catch
         {
             await UiThread.SwitchToUi();
             Proposals.Clear();
             Denials.Clear();
+            Editor.EditorChangesService.Current.ClearAll();
         }
     }
 
