@@ -16,6 +16,15 @@
     <CopyBuildOutputToOutputDirectory>true</CopyBuildOutputToOutputDirectory>
     <CopyOutputSymbolsToOutputDirectory>false</CopyOutputSymbolsToOutputDirectory>
 
+    <!-- Auto-deploy the freshly-built VSIX into the Experimental Instance's
+         extension hive on every build. Combined with the launchSettings.json
+         "Experimental Instance" profile (devenv.exe /rootSuffix Exp), F5
+         becomes a one-step "build, deploy, launch with new extension"
+         workflow — no more manual setup.exe modify dance during dev.
+         The Marketplace-shipped VSIX in bin\Release\…\ChatRelay.vsix is
+         unaffected; this only writes into the per-user Exp hive. -->
+    <DeployExtension>True</DeployExtension>
+
     <!-- Threading analyzer noise that doesn't reflect real bugs in our usage:
          VSSDK007  false positive on FileAndForget pattern
          VSTHRD010 can't prove UI-thread call sites the analyzer doesn't trace
