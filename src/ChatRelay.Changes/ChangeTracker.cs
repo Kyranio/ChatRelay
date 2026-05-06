@@ -87,6 +87,22 @@ public sealed class ChangeTracker
     }
 
     /// <summary>
+    /// Tells the tracker which model is currently driving the session, so
+    /// future tool-use observations can stamp the model onto the file's
+    /// <see cref="FileTracker.LastModel"/>. Wired from <c>HostService</c>'s
+    /// <c>ModelInfo</c> event handler. Calling with a null/empty value
+    /// clears the stored model.
+    /// </summary>
+    public void SetCurrentModel(string sessionId, string? modelDisplayName)
+    {
+        var s = GetOrCreate(sessionId);
+        lock (s.Sync)
+        {
+            s.CurrentModel = string.IsNullOrEmpty(modelDisplayName) ? null : modelDisplayName;
+        }
+    }
+
+    /// <summary>
     /// Acts on a tool-use observation from any adapter. Internally filters
     /// to file-mutating tools and to paths inside the current workspace —
     /// out-of-tree writes are silently ignored per the spec.
@@ -542,6 +558,11 @@ public sealed class ChangeTracker
                 }
             }
             existing.ExpectingWrite = true;
+            // Stamp the session's current model onto the file. If a turn
+            // starts before any ModelInfo has arrived, LastModel stays at
+            // its prior value (or null on the very first tool_use), and
+            // gets overwritten the next time around.
+            if (s.CurrentModel is not null) existing.LastModel = s.CurrentModel;
             return;
         }
 
@@ -563,6 +584,7 @@ public sealed class ChangeTracker
             Accepted = baseline,         // nothing accepted yet
             LastApplied = baseline,      // pre-write — model hasn't run yet
             ExpectingWrite = true,       // tool will write between now and tool_result
+            LastModel = s.CurrentModel,  // null until ModelInfo lands; surfaced in snapshot
         };
     }
 
@@ -774,7 +796,8 @@ public sealed class ChangeTracker
                         CurrentCount: h.NewCount,
                         BaselineLines: h.OldLines,
                         CurrentLines: h.NewLines,
-                        State: f.AcceptedHunks.Contains(key) ? "accepted" : "open"));
+                        State: f.AcceptedHunks.Contains(key) ? "accepted" : "open",
+                        Model: f.LastModel));
                 }
                 proposals.Add(new ChangeProposal(
                     FilePath: f.DisplayPath,
@@ -830,5 +853,14 @@ public sealed class ChangeTracker
     {
         public readonly object Sync = new();
         public readonly Dictionary<string, FileTracker> Files = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// Display name of the model the host most recently announced for
+        /// this session via <c>onModelInfo</c>. Stamped onto each
+        /// <see cref="FileTracker"/> when it sees a tool_use, then surfaced
+        /// in the snapshot so the editor adornment can show "Edited by X".
+        /// Null until the first <c>ModelInfo</c> event lands.
+        /// </summary>
+        public string? CurrentModel;
     }
 }

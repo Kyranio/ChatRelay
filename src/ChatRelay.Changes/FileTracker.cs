@@ -79,6 +79,20 @@ public sealed class FileTracker
     /// watcher path skips that misfire.
     /// </summary>
     public bool ExpectingWrite { get; set; }
+
+    /// <summary>
+    /// Display name of the model that most recently touched this file
+    /// (e.g. "Claude Sonnet 4.5"). Populated from the session's
+    /// <c>CurrentModel</c> at <c>tool_use</c> observation time. Null until
+    /// a <c>ModelInfo</c> event has been seen for the session.
+    /// <para>
+    /// Per-file granularity (rather than per-hunk) — accurate enough for
+    /// the "Edited by X" tooltip on accepted hunks, and avoids retaining
+    /// extra per-hunk state. If the user mid-conversation switches models
+    /// and the new model touches the same file, the latest model wins.
+    /// </para>
+    /// </summary>
+    public string? LastModel { get; set; }
 }
 
 /// <summary>

@@ -123,7 +123,8 @@ public record HunkInfo(
     int CurrentCount,
     IReadOnlyList<string> BaselineLines,
     IReadOnlyList<string> CurrentLines,
-    string State);              // "open" | "accepted"
+    string State,                // "open" | "accepted"
+    string? Model);              // display name of the model that authored this file's edits
 
 public record DenialGroup(
     string FilePath,

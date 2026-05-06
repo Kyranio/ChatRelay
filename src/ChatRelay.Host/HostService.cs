@@ -222,6 +222,11 @@ public sealed class HostService
                     break;
                 case AiEventKind.ModelInfo:
                     if (!string.IsNullOrEmpty(e.ModelDisplayName)) finalModel = e.ModelDisplayName;
+                    // Tell the change tracker which model is currently
+                    // driving this session so it can stamp it on every
+                    // tool_use that follows. Surfaced in the snapshot's
+                    // HunkInfo.Model for the editor's "Edited by X" tooltip.
+                    _changes.SetCurrentModel(p.SessionId, e.ModelDisplayName);
                     _ = Rpc?.NotifyAsync("onModelInfo", new ModelInfoEvent(p.SessionId, e.ModelDisplayName ?? ""));
                     break;
                 case AiEventKind.SessionUpdate:
