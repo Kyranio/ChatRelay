@@ -711,22 +711,62 @@ public sealed class ChangeTracker
                     continue;
                 }
 
-                // External modification. Drop denial records whose post-deny
-                // expected state doesn't match the new disk content.
+                // External modification. Three concerns to handle in order:
+                //
+                //   (a) Drop denial records whose post-deny expected state
+                //       doesn't match the new disk content (the surviving-
+                //       denials invariant).
                 var before = f.Denied.Count;
                 var removed = f.Denied.RemoveAll(
                     d => !string.Equals(d.DiskContentAtDeny, content, StringComparison.Ordinal));
-                ExtensionLogger.Info("changes",
-                    $"External edit on {absolutePath}: dropped {removed}/{before} denial(s)");
 
-                // If the file no longer has a meaningful tracker state
-                // (no open/accepted proposal AND no surviving denials),
-                // drop the entry entirely. Without this, a later Claude
-                // edit would diff against the obsolete pre-user-edit
-                // Baseline — making the user's removed lines invisible
-                // in the +N/−M counts.
+                //   (b) If the file has a live proposal (open hunks or
+                //       accepted hunks), the user is editing within the
+                //       model's edit set this turn — fold their changes
+                //       into the proposal by updating LastApplied. Two
+                //       follow-on effects:
+                //         • diff(Baseline, LastApplied) now includes the
+                //           user's lines, so an Accept/Reject from chat
+                //           or the editor covers them too.
+                //         • Accepted hunks whose new-side content the user
+                //           has touched get pruned by the content-aware
+                //           HunkKey — the accept marker drops naturally
+                //           for that hunk, per spec ("disappears for the
+                //           specific line if the user modifies the code").
+                //       The marker for an unmodified accepted hunk shifts
+                //       to its new line position because the snapshot's
+                //       CurrentStart/CurrentCount come straight from the
+                //       fresh diff — it follows the model's lines as the
+                //       user inserts/deletes around them.
+                bool extendedProposal = false;
+                if (f.HasProposal || f.AcceptedHunks.Count > 0)
+                {
+                    f.LastApplied = content;
+                    PruneStaleAcceptedHunksLocked(f);
+                    f.Accepted = ApplyAcceptedHunks(f);
+                    // The user's edit means we're no longer in "everything
+                    // accepted" territory — even if every per-hunk accept
+                    // survived, the user's net-new lines are open until
+                    // they explicitly accept them.
+                    f.IsAccepted = string.Equals(f.Accepted, f.LastApplied, StringComparison.Ordinal)
+                        && f.AcceptedHunks.Count > 0;
+                    extendedProposal = true;
+                    ExtensionLogger.Info("changes",
+                        $"External edit on {absolutePath}: extended proposal "
+                        + $"(dropped {removed}/{before} denial(s), {f.AcceptedHunks.Count} accepted hunk(s) survive)");
+                }
+                else
+                {
+                    ExtensionLogger.Info("changes",
+                        $"External edit on {absolutePath}: dropped {removed}/{before} denial(s)");
+                }
+
+                //   (c) If we didn't extend a proposal AND nothing
+                //       meaningful is left, drop the entry entirely so the
+                //       next model touch captures a fresh Baseline
+                //       reflecting the user's intermediate state.
                 bool entryDropped = false;
-                if (!f.HasProposal && f.Denied.Count == 0)
+                if (!extendedProposal && !f.HasProposal && f.Denied.Count == 0)
                 {
                     session.Files.Remove(key);
                     entryDropped = true;
@@ -734,7 +774,7 @@ public sealed class ChangeTracker
                         $"Dropped tracker entry for {absolutePath} (clean state after external edit)");
                 }
 
-                if (removed > 0 || entryDropped) changedSessions.Add(kv.Key);
+                if (removed > 0 || entryDropped || extendedProposal) changedSessions.Add(kv.Key);
             }
         }
         if (!anyTracked)

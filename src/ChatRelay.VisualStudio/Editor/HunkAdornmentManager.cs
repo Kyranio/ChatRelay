@@ -162,8 +162,8 @@ sealed class HunkAdornmentManager
             span, AdornmentTagFor(h, "accepted-bar"), bar, null);
 
         // Reject button below the region — same compact secondary style
-        // as open hunks, right-aligned to match. Accept is intentionally
-        // absent (already accepted).
+        // as open hunks, anchored at the viewport's left edge to mirror the
+        // open-hunk layout. Accept is intentionally absent (already accepted).
         var reject = BuildIconButton("↶", primary: false);
         reject.ToolTip = $"Revert this change ({modelLabel})";
         reject.Click += async (_, _) => await OnRejectClicked(h);
@@ -171,10 +171,10 @@ sealed class HunkAdornmentManager
         var row = new StackPanel
         {
             Orientation = Orientation.Horizontal,
-            HorizontalAlignment = HorizontalAlignment.Right,
+            HorizontalAlignment = HorizontalAlignment.Left,
         };
         row.Children.Add(reject);
-        Canvas.SetLeft(row, _view.ViewportRight - SmallButtonWidth - 8);
+        Canvas.SetLeft(row, _view.ViewportLeft + 4);
         Canvas.SetTop(row, lastView.Bottom + 2);
         _layer.AddAdornment(
             AdornmentPositioningBehavior.OwnerControlled,
@@ -235,30 +235,44 @@ sealed class HunkAdornmentManager
             belowY = view.Top;
         }
 
-        // ---- 2. Below the highlight: expander on the left, buttons on
-        //         the right. Two separate adornments so the buttons can
-        //         pin to the viewport's right edge while the expander
-        //         hugs the left.
+        // ---- 2. Below the highlight: expander + buttons in one horizontal
+        //         row anchored at the viewport's left. Keeping the buttons
+        //         next to the expander (rather than pinned right) means
+        //         users on ultrawide displays don't have to scan the entire
+        //         line width to find them. VerticalAlignment.Top on the
+        //         button row keeps them aligned with the expander header
+        //         even when the expander is open.
 
         var anchorSpan = new SnapshotSpan(
             snapshot.GetLineFromLineNumber(Math.Max(0, h.CurrentStart)).Start, 0);
 
+        var combined = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Left,
+        };
+
         if (h.BaselineLines.Count > 0)
         {
             var expander = BuildGhostExpander(h);
-            Canvas.SetLeft(expander, _view.ViewportLeft + 4);
-            Canvas.SetTop(expander, belowY + 2);
-            _layer.AddAdornment(
-                AdornmentPositioningBehavior.OwnerControlled,
-                anchorSpan, AdornmentTagFor(h, "expander"), expander, null);
+            combined.Children.Add(expander);
         }
 
         var buttons = BuildButtonRow(h);
-        Canvas.SetLeft(buttons, _view.ViewportRight - OpenButtonRowWidth - 8);
-        Canvas.SetTop(buttons, belowY + 2);
+        // Anchor the buttons to the top of the row so they stay next to
+        // the expander header when the user opens the expander.
+        if (buttons is FrameworkElement fe)
+        {
+            fe.VerticalAlignment = VerticalAlignment.Top;
+            fe.Margin = new Thickness(h.BaselineLines.Count > 0 ? 6 : 0, 0, 0, 0);
+        }
+        combined.Children.Add(buttons);
+
+        Canvas.SetLeft(combined, _view.ViewportLeft + 4);
+        Canvas.SetTop(combined, belowY + 2);
         _layer.AddAdornment(
             AdornmentPositioningBehavior.OwnerControlled,
-            anchorSpan, AdornmentTagFor(h, "buttons"), buttons, null);
+            anchorSpan, AdornmentTagFor(h, "row"), combined, null);
     }
 
     // 28×20 each + 6px gap between = 62 total width. Used to right-align
@@ -274,21 +288,43 @@ sealed class HunkAdornmentManager
             ? "1 removed line"
             : $"{h.BaselineLines.Count} removed lines";
 
-        // Body: each old line as a row, greyed out (no strikethrough).
-        var ghost = new StackPanel { Orientation = Orientation.Vertical, Margin = new Thickness(18, 4, 4, 4) };
-        foreach (var line in h.BaselineLines)
+        // Body: a single read-only TextBox so the user can select and copy
+        // portions of the original code if they want to restore them by
+        // hand. Transparent border / background lets the surrounding wrap
+        // panel provide the visual surface, while the TextBox itself stays
+        // tab-out-of-the-way (IsTabStop=false).
+        var ghostText = new TextBox
         {
-            var tb = new TextBlock
-            {
-                Text = string.IsNullOrEmpty(line) ? " " : line,    // keep height for blank lines
-                FontFamily = new FontFamily("Consolas, Lucida Sans Typewriter, Courier New"),
-                FontSize = 12,
-                Opacity = 0.55,
-                TextWrapping = TextWrapping.NoWrap,
-            };
-            tb.SetResourceReference(TextBlock.ForegroundProperty, EnvironmentColors.ToolWindowTextBrushKey);
-            ghost.Children.Add(tb);
-        }
+            Text = string.Join(Environment.NewLine, h.BaselineLines),
+            IsReadOnly = true,
+            IsReadOnlyCaretVisible = false,
+            BorderThickness = new Thickness(0),
+            Background = Brushes.Transparent,
+            Padding = new Thickness(18, 4, 4, 4),
+            FontFamily = new FontFamily("Consolas, Lucida Sans Typewriter, Courier New"),
+            FontSize = 12,
+            Opacity = 0.85,
+            IsTabStop = false,
+            AcceptsReturn = true,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Hidden,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            TextWrapping = TextWrapping.NoWrap,
+        };
+        ghostText.SetResourceReference(Control.ForegroundProperty, EnvironmentColors.ToolWindowTextBrushKey);
+
+        // Wrap the textbox in a Border that paints a solid surface + outline
+        // when the expander is open. Without this the Expander's content
+        // host is transparent and the text bleeds into the editor below,
+        // which is what made it hard to spot.
+        var ghostSurface = new Border
+        {
+            Child = ghostText,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(2),
+            Margin = new Thickness(0, 2, 0, 0),
+        };
+        ghostSurface.SetResourceReference(Border.BackgroundProperty, EnvironmentColors.DropDownBackgroundBrushKey);
+        ghostSurface.SetResourceReference(Border.BorderBrushProperty, EnvironmentColors.ComboBoxBorderBrushKey);
 
         var expander = new Expander
         {
@@ -299,10 +335,10 @@ sealed class HunkAdornmentManager
             Margin = new Thickness(0, 0, 0, 4),
             FontSize = 11,
             HorizontalAlignment = HorizontalAlignment.Left,
-            Content = ghost,
+            Content = ghostSurface,
         };
         expander.SetResourceReference(Control.ForegroundProperty, EnvironmentColors.ToolWindowTextBrushKey);
-        expander.SetResourceReference(Control.BackgroundProperty, EnvironmentColors.ToolWindowBackgroundBrushKey);
+        expander.SetResourceReference(Control.BackgroundProperty, EnvironmentColors.DropDownBackgroundBrushKey);
         expander.SetResourceReference(Control.BorderBrushProperty, EnvironmentColors.ComboBoxBorderBrushKey);
         return expander;
     }

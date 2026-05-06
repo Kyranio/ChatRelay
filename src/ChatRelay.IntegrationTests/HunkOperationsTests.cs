@@ -286,4 +286,128 @@ public sealed class HunkOperationsTests : IDisposable
         var stillThere = snap.Proposals[0].Hunks[0];
         Assert.Equal("accepted", stillThere.State);
     }
+
+    // ---- Phase 4.4a: live-buffer extension --------------------------
+    // External-edit flow: the user manually edits a file that already
+    // has an open / accepted proposal. The watcher fires on save and
+    // the tracker folds those edits into the live diff so accept/reject
+    // covers the user's lines too. PhaseSpec covered:
+    //   • Open hunk grows with user-added lines
+    //   • Reject of the extended hunk removes user lines along with model lines
+    //   • External edit to an accepted line drops that hunk's marker
+    //   • External edit outside any hunk surfaces as a new open hunk
+    //   • External edit inside an accepted hunk that doesn't change its
+    //     content (e.g. inserting blank lines after) keeps the accept
+    //     marker for the model's lines
+
+    [Fact]
+    public void External_edit_extends_open_hunk_to_include_user_added_lines()
+    {
+        var path = MakeFile("foo.cs", "a\nb\nc\n");
+        EditCycle(path, "a\nB\nc\n");        // model: replace b with B
+
+        // User adds a line manually within the hunk and saves.
+        WriteWithRetry(path, "a\nB\nX\nc\n");
+        _tracker.OnExternalFileChange(path);
+
+        var p = Assert.Single(_tracker.Snapshot(SessionId).Proposals);
+        var h = Assert.Single(p.Hunks);
+        Assert.Equal("open", h.State);
+        // The hunk now covers the model's replacement AND the user's insert.
+        Assert.Contains("X", h.CurrentLines);
+        Assert.Contains("B", h.CurrentLines);
+    }
+
+    [Fact]
+    public void External_edit_to_accepted_line_drops_marker_for_that_hunk()
+    {
+        var path = MakeFile("foo.cs", "a\nb\nc\n");
+        EditCycle(path, "a\nB\nc\n");
+        var firstHunk = _tracker.Snapshot(SessionId).Proposals[0].Hunks[0];
+        Assert.True(_tracker.AcceptHunk(SessionId, path, firstHunk.BaselineStart, firstHunk.BaselineCount));
+        Assert.Equal("accepted", _tracker.Snapshot(SessionId).Proposals[0].Hunks[0].State);
+
+        // User modifies the model's accepted line.
+        WriteWithRetry(path, "a\nBx\nc\n");
+        _tracker.OnExternalFileChange(path);
+
+        var h = _tracker.Snapshot(SessionId).Proposals[0].Hunks[0];
+        // Marker dropped — content changed → key invalidated → back to "open".
+        Assert.Equal("open", h.State);
+        Assert.Contains("Bx", h.CurrentLines);
+    }
+
+    [Fact]
+    public void External_edit_outside_hunk_surfaces_as_new_open_hunk()
+    {
+        var path = MakeFile("foo.cs", "a\nb\nc\nd\n");
+        EditCycle(path, "a\nB\nc\nd\n");    // model: replace b with B
+
+        // User edits a region the model didn't touch.
+        WriteWithRetry(path, "a\nB\nc\nD\n");
+        _tracker.OnExternalFileChange(path);
+
+        var p = Assert.Single(_tracker.Snapshot(SessionId).Proposals);
+        Assert.Equal(2, p.Hunks.Count);
+        Assert.All(p.Hunks, h => Assert.Equal("open", h.State));
+    }
+
+    [Fact]
+    public void Reject_after_user_extends_open_hunk_reverts_user_lines_too()
+    {
+        var path = MakeFile("foo.cs", "a\nb\nc\n");
+        EditCycle(path, "a\nB\nc\n");
+
+        // User adds a line in the hunk, then saves.
+        WriteWithRetry(path, "a\nB\nX\nc\n");
+        _tracker.OnExternalFileChange(path);
+
+        var h = _tracker.Snapshot(SessionId).Proposals[0].Hunks[0];
+        Assert.True(_tracker.RejectHunk(SessionId, path, h.BaselineStart, h.BaselineCount));
+
+        // Reject reverts the entire (extended) region to baseline — both
+        // the model's "B" and the user's "X" are gone.
+        Assert.Equal("a\nb\nc\n", File.ReadAllText(path));
+    }
+
+    [Fact]
+    public void Accept_after_user_extends_open_hunk_keeps_user_lines()
+    {
+        var path = MakeFile("foo.cs", "a\nb\nc\n");
+        EditCycle(path, "a\nB\nc\n");
+
+        WriteWithRetry(path, "a\nB\nX\nc\n");
+        _tracker.OnExternalFileChange(path);
+
+        var h = _tracker.Snapshot(SessionId).Proposals[0].Hunks[0];
+        Assert.True(_tracker.AcceptHunk(SessionId, path, h.BaselineStart, h.BaselineCount));
+
+        // Accept locks in the extended hunk; disk untouched (still has
+        // both lines), Accepted now matches LastApplied.
+        Assert.Equal("a\nB\nX\nc\n", File.ReadAllText(path));
+        var p = _tracker.Snapshot(SessionId).Proposals[0];
+        Assert.Equal("accepted", p.Hunks[0].State);
+    }
+
+    [Fact]
+    public void External_edit_with_no_proposal_still_drops_tracker_entry()
+    {
+        // Ensure we didn't break the Phase 3.1 case: an external edit on
+        // a file with no live proposal (Baseline == LastApplied) and no
+        // denials still drops the tracker entry so the next model edit
+        // captures a fresh baseline.
+        var path = MakeFile("foo.cs", "v1");
+        EditCycle(path, "v2");
+        _tracker.Deny(SessionId, path);    // back to v1, one denial
+
+        // User edits to a third state, dropping the denial.
+        WriteWithRetry(path, "v3-user");
+        _tracker.OnExternalFileChange(path);
+
+        // Next model edit should baseline against v3-user, not v1.
+        EditCycle(path, "v4-model");
+        var p = Assert.Single(_tracker.Snapshot(SessionId).Proposals);
+        Assert.Equal(1, p.LinesAdded);
+        Assert.Equal(1, p.LinesRemoved);
+    }
 }
