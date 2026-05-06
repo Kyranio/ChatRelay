@@ -129,7 +129,12 @@ sealed class HunkAdornmentManager
         // Pick up any hunks already known (the snapshot may have arrived
         // before the editor view opened).
         RebuildTrackedFromService();
-        if (_tracked.Count > 0) RenderHunks();
+        if (_tracked.Count > 0)
+        {
+            bool transformsChanged = UpdateLineTransforms();
+            RenderHunks();
+            if (transformsChanged) QueueDeferredRender();
+        }
     }
 
     void OnHunksChanged(string changedPath)
@@ -138,8 +143,15 @@ sealed class HunkAdornmentManager
         if (!string.Equals(changedPath, _filePath, StringComparison.OrdinalIgnoreCase)) return;
         RebuildTrackedFromService();
         Debug.WriteLine($"[ChatRelay.editor] Hunks for {_filePath}: {_tracked.Count} hunk(s)");
-        UpdateLineTransforms();
+        bool transformsChanged = UpdateLineTransforms();
+        // Always render once now (first paint, possibly with stale
+        // line positions on multi-hunk files). If we just kicked off a
+        // format pass, queue a follow-up render at Background priority
+        // so it runs once VS has finished re-laying out — that's when
+        // ITextViewLine.Top reflects the reserved gaps and the blocks
+        // land in their own slots instead of piling up.
         RenderHunks();
+        if (transformsChanged) QueueDeferredRender();
     }
 
     void OnLayoutChanged(object? sender, TextViewLayoutChangedEventArgs e)
@@ -211,8 +223,10 @@ sealed class HunkAdornmentManager
         // Anchor line numbers may have shifted — refresh the line-transform
         // map so the inline removed-lines blocks ride along with the user's
         // edits. DictionariesEqual inside SetTopSpaces avoids spurious
-        // re-formats when nothing actually moved.
-        UpdateLineTransforms();
+        // re-formats when nothing actually moved. If the map DID change,
+        // queue a deferred render so positions are recomputed after the
+        // format pass settles.
+        if (UpdateLineTransforms()) QueueDeferredRender();
     }
 
     /// <summary>
@@ -220,11 +234,20 @@ sealed class HunkAdornmentManager
     /// open hunks and pushes it into <see cref="_lineTransform"/>. The
     /// reserved space is where <see cref="RenderRemovedLinesBlock"/>
     /// paints the inline red block on the next layout pass.
+    ///
+    /// <para>
+    /// Returns true iff the reservations actually changed — caller uses
+    /// that to decide whether to defer the next render until VS has run
+    /// the format pass triggered by <see cref="HunkLineTransformSource.SetTopSpaces"/>.
+    /// Without the deferral, immediate renders use the pre-format
+    /// <c>ITextViewLine.Top</c> values and adornments stack on top of
+    /// each other for files with multiple open hunks.
+    /// </para>
     /// </summary>
-    void UpdateLineTransforms()
+    bool UpdateLineTransforms()
     {
-        if (_lineTransform is null) return;
-        if (_inLayoutUpdate) return;
+        if (_lineTransform is null) return false;
+        if (_inLayoutUpdate) return false;
 
         var snapshot = _view.TextSnapshot;
         var lineHeight = _view.LineHeight > 0 ? _view.LineHeight : 16;
@@ -253,8 +276,40 @@ sealed class HunkAdornmentManager
         }
 
         _inLayoutUpdate = true;
-        try { _lineTransform.SetTopSpaces(map); }
+        try { return _lineTransform.SetTopSpaces(map); }
         finally { _inLayoutUpdate = false; }
+    }
+
+    /// <summary>
+    /// Queues a render at <see cref="DispatcherPriority.Background"/> so
+    /// it runs AFTER the format pass triggered by a top-space change has
+    /// completed and <c>ITextViewLine.Top</c> values reflect the new
+    /// reserved gaps. Without this, an immediate render-after-update
+    /// reads stale <c>Top</c> values and adornments on different lines
+    /// pile up on each other (the bug that the user-visible "hunks
+    /// overlap until you type" behaviour was reporting).
+    /// </summary>
+    void QueueDeferredRender()
+    {
+        try
+        {
+            _view.VisualElement.Dispatcher.BeginInvoke(
+                new Action(SafeRender),
+                System.Windows.Threading.DispatcherPriority.Background);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[ChatRelay.editor] Deferred render dispatch failed: {ex.Message}");
+        }
+    }
+
+    void SafeRender()
+    {
+        try { RenderHunks(); }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[ChatRelay.editor] Render failed: {ex.Message}");
+        }
     }
 
     /// <summary>
