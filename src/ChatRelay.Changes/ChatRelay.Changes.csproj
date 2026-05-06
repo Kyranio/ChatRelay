@@ -27,4 +27,11 @@
     <ProjectReference Include="..\ChatRelay.Logging\ChatRelay.Logging.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Lets ChangeTrackerTests in the integration-test project drive
+         OnExternalFileChange directly instead of waiting on real FS events,
+         which would make the tests slow and flaky. -->
+    <InternalsVisibleTo Include="ChatRelay.IntegrationTests" />
+  </ItemGroup>
+
 </Project>

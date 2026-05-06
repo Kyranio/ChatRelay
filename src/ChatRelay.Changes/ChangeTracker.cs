@@ -430,15 +430,8 @@ public sealed class ChangeTracker
     /// back through the watcher and shouldn't invalidate anything.
     /// </para>
     /// </summary>
-    void OnExternalFileChange(string absolutePath)
+    internal void OnExternalFileChange(string absolutePath)
     {
-        // File-system events fire on a thread-pool thread before the writer
-        // has necessarily released its lock. Retry the read a few times
-        // with a tiny backoff so we don't silently drop a real edit just
-        // because we raced VS's save handle.
-        string? content = TryReadWithRetry(absolutePath);
-        if (content is null) return;
-
         var key = NormalisePath(absolutePath);
         var changedSessions = new List<string>();
         bool anyTracked = false;
@@ -459,6 +452,18 @@ public sealed class ChangeTracker
                     ExtensionLogger.Debug("changes", $"Watcher echo (ExpectingWrite): {absolutePath}");
                     continue;
                 }
+
+                // Read disk INSIDE the lock. Reading before lock-acquire
+                // would let a concurrent Accept/Deny/Redo settle disk +
+                // LastApplied between our read and our state check —
+                // we'd then compare a stale content snapshot against the
+                // freshly-updated LastApplied, mistakenly classifying the
+                // operation's own write as an external edit and dropping
+                // denials that were correctly applied. File-system events
+                // can also fire before the writer has released its lock,
+                // hence the retry-on-IOException loop in TryReadWithRetry.
+                string? content = TryReadWithRetry(absolutePath);
+                if (content is null) continue;
 
                 // Disk matches a clean state we know about → echo of our own
                 // write or a no-op (e.g. tool that touched but didn't modify).
@@ -516,7 +521,15 @@ public sealed class ChangeTracker
             try
             {
                 if (!File.Exists(path)) return string.Empty;
-                return File.ReadAllText(path);
+                // FileShare.ReadWrite so a concurrent writer (the user
+                // saving in VS, or even the model's tool finishing its
+                // write) doesn't fail us with a sharing violation.
+                // Worst case: we read a partially-written buffer; the
+                // content-comparison logic upstream falls through as
+                // "external edit" and the next event resolves it.
+                using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                using var sr = new StreamReader(fs);
+                return sr.ReadToEnd();
             }
             catch (IOException) when (attempt < 4)
             {
