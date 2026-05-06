@@ -387,14 +387,15 @@ sealed class HunkAdornmentManager
     void RenderAcceptedHunk(HunkInfo h, SnapshotSpan span, ITextSnapshot snapshot)
     {
         if (_layer is null) return;
-        // Accepted hunk marker:
+        // Accepted hunk marker — set in stone under the simplified model:
         //   - thin turquoise vertical bar in the left margin of the lines
         //     the model produced (positioned via the live tracking span,
         //     so it follows the user's edits around it)
-        //   - tooltip "Edited by {Model}" — model resolved from the hunk's
-        //     Model field (carried on the wire by Phase 4.3a)
-        //   - reject (↶) button below the region so the user can still
-        //     change their mind from inside the editor
+        //   - tooltip "Edited by {Model}" for provenance
+        // No inline reject button: an accepted hunk is permanent. The user
+        // reverts via the editor's own undo stack (ctrl+Z) — that's the
+        // story we're committing to so users can never bring a removed
+        // hunk back into the change list themselves.
         if (span.Length <= 0) return;
 
         var firstView = _view.TextViewLines.GetTextViewLineContainingBufferPosition(span.Start);
@@ -420,27 +421,6 @@ sealed class HunkAdornmentManager
         _layer.AddAdornment(
             AdornmentPositioningBehavior.OwnerControlled,
             span, AdornmentTagFor(h, "accepted-bar"), bar, null);
-
-        // Reject button below the region — same compact secondary style
-        // as open hunks, anchored at the viewport's left edge to mirror the
-        // open-hunk layout. Accept is intentionally absent (already accepted).
-        var reject = BuildIconButton("↶", primary: false);
-        reject.ToolTip = $"Revert this change ({modelLabel})";
-        reject.Click += async (_, _) => await OnRejectClicked(h);
-
-        var row = new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            HorizontalAlignment = HorizontalAlignment.Left,
-        };
-        row.Children.Add(reject);
-        Canvas.SetLeft(row, _view.ViewportLeft + 4);
-        Canvas.SetTop(row, lastView.Bottom + 2);
-        // Overlay layer — sits above editor Text so the button isn't
-        // obscured by the source code drawn in this row.
-        (_overlay ?? _layer).AddAdornment(
-            AdornmentPositioningBehavior.OwnerControlled,
-            span, AdornmentTagFor(h, "accepted-reject"), row, null);
     }
 
     void RenderOpenHunk(HunkInfo h, SnapshotSpan span, ITextSnapshot snapshot)

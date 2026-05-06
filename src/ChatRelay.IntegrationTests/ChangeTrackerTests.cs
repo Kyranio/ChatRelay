@@ -119,24 +119,52 @@ public sealed class ChangeTrackerTests : IDisposable
     // ---- Deny-after-accept regression --------------------------------
 
     [Fact]
-    public void Deny_after_accept_reverts_disk_to_baseline_and_creates_denial()
+    public void Deny_after_accept_is_noop_because_accepted_is_set_in_stone()
     {
-        // Regression: Deny used to short-circuit when Accepted == LastApplied
-        // (which is exactly the post-accept state), so undo-after-accept
-        // looked like a no-op. Fix reverts to Baseline regardless of state.
+        // Under the simplified "users only remove" model, accepted
+        // changes are permanent — Deny only reverts OPEN hunks. Once a
+        // file has been wholesale-accepted there are no open hunks, so
+        // Deny is a no-op. The user reverts via the editor's undo stack.
         var path = MakeFile("foo.cs", "before");
         EditCycle(path, "after");
         _tracker.Accept(SessionId, path);
         Assert.Equal("after", File.ReadAllText(path));
 
+        Assert.False(_tracker.Deny(SessionId, path));
+
+        // Disk and tracker state intact — accepted change preserved.
+        Assert.Equal("after", File.ReadAllText(path));
+        var snap = _tracker.Snapshot(SessionId);
+        var p = Assert.Single(snap.Proposals);
+        Assert.Equal("accepted", p.State);
+        Assert.Empty(snap.Denials);
+    }
+
+    [Fact]
+    public void Deny_with_partial_accept_reverts_open_only_and_keeps_accepted_hunks()
+    {
+        // When a file has both accepted and open hunks, per-file Deny
+        // should leave the accepted hunks alone and only revert the
+        // open ones — same semantics as DenyAllOpen but scoped to one
+        // file.
+        var path = MakeFile("multi.cs", "a\nb\nc\n");
+        EditCycle(path, "A\nb\nC\n");                  // two model hunks
+        var firstHunk = _tracker.Snapshot(SessionId).Proposals[0].Hunks[0];
+        // Accept just the first hunk.
+        Assert.True(_tracker.AcceptHunk(SessionId, path, firstHunk.BaselineStart, firstHunk.BaselineCount));
+
+        // Deny the file — only the still-open second hunk should revert.
         Assert.True(_tracker.Deny(SessionId, path));
 
-        Assert.Equal("before", File.ReadAllText(path));
+        Assert.Equal("A\nb\nc\n", File.ReadAllText(path));
         var snap = _tracker.Snapshot(SessionId);
-        Assert.Empty(snap.Proposals);
+        var p = Assert.Single(snap.Proposals);
+        // Accepted hunk preserved; open one gone.
+        var remaining = Assert.Single(p.Hunks);
+        Assert.Equal("accepted", remaining.State);
+        // Denial stashes the pre-deny content so redo can bring it back.
         var d = Assert.Single(snap.Denials);
         Assert.Single(d.Entries);
-        Assert.True(d.Entries[0].CanRedo);
     }
 
     [Fact]

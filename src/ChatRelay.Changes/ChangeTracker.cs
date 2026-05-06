@@ -197,11 +197,17 @@ public sealed class ChangeTracker
     }
 
     /// <summary>
-    /// Rejects a single hunk, identified by baseline coordinates. Splices
-    /// the baseline content back into LastApplied (and into Accepted if the
-    /// hunk had been accepted), writes the file to disk, and stashes a
-    /// denial record so the user can redo. Works on both open and accepted
-    /// hunks; the file's region returns to baseline either way.
+    /// Rejects a single OPEN hunk, identified by baseline coordinates.
+    /// Splices the baseline content back into LastApplied, writes the
+    /// file to disk, and stashes a denial record so the user can redo.
+    ///
+    /// <para>
+    /// Refuses (returns false) on accepted hunks. Per the simplified
+    /// model, accepted hunks are set in stone — the user reverts via the
+    /// editor's own undo stack rather than through this extension. This
+    /// guard prevents both the inline editor and chat-side bulk paths
+    /// from clobbering an accepted change.
+    /// </para>
     /// </summary>
     public bool RejectHunk(string sessionId, string filePath, int baselineStart, int baselineCount)
     {
@@ -217,7 +223,8 @@ public sealed class ChangeTracker
             var hunk = hunkOpt.Value;
             var key = MakeKey(hunk);
 
-            bool wasAccepted = f.AcceptedHunks.Contains(key);
+            // Accepted hunks are set in stone — refuse rather than revert.
+            if (f.AcceptedHunks.Contains(key)) return false;
 
             // Capture pre-reject snapshot for the redo path.
             var preRejectLastApplied = f.LastApplied;
@@ -226,16 +233,6 @@ public sealed class ChangeTracker
             // current position. Effect: that region now matches Baseline.
             var newLastApplied = LineDiff.SpliceLines(
                 f.LastApplied, hunk.NewStart, hunk.NewCount, hunk.OldLines);
-
-            // If the hunk had been accepted, also revert it in Accepted —
-            // otherwise Accepted would still contain NewLines at that
-            // position and snapshot diffs would mis-classify the file.
-            string newAccepted = f.Accepted;
-            if (wasAccepted)
-            {
-                int projected = ProjectBaselineToAccepted(f, hunks, baselineStart);
-                newAccepted = LineDiff.SpliceLines(newAccepted, projected, hunk.NewCount, hunk.OldLines);
-            }
 
             try
             {
@@ -248,8 +245,9 @@ public sealed class ChangeTracker
             }
 
             f.LastApplied = newLastApplied;
-            f.Accepted = newAccepted;
-            f.AcceptedHunks.Remove(key);
+            // Accepted blob is unaffected — we refused on accepted hunks
+            // earlier, so this hunk wasn't in AcceptedHunks. Other accepted
+            // hunks' contributions stay intact.
             f.IsAccepted = false;
 
             // The denial is whole-file: ContentToReapply restores the file
@@ -400,37 +398,31 @@ public sealed class ChangeTracker
         lock (s.Sync)
         {
             if (!s.Files.TryGetValue(NormalisePath(filePath), out var f)) return false;
-            // Phase 1 semantics: per-file deny means "revert this file to
-            // its session-baseline content" regardless of whether the user
-            // accepted earlier. That makes undo-after-accept work — the
-            // previous comparison (Accepted vs LastApplied) treated an
-            // already-accepted file as "nothing to deny" because Accept
-            // sets them equal, so the user couldn't change their mind.
-            //
-            // Hunk-level deny (per-hunk decision) is the future inline-
-            // editor phase; the FileTracker shape already supports it
-            // without touching this method.
-            if (string.Equals(f.Baseline, f.LastApplied, StringComparison.Ordinal)) return false;
+            // Per-file deny under the simplified model: revert OPEN hunks
+            // only, leave accepted hunks intact (they're set in stone).
+            // Effectively a per-file "deny all open" scoped to this file.
+            // No-op if there are no open changes (Accepted already covers
+            // everything that's on disk).
+            if (!f.HasOpenChanges) return false;
 
-            // Capture deny payload BEFORE we mutate disk, so a write failure
-            // doesn't leave the tracker in a half-state. Counts are vs the
-            // baseline so the denied row shows the complete model-edit set
-            // the user just rolled back, not a stale 0/0 from an earlier
-            // accept.
-            var counts = LineDiff.Compute(f.Baseline, f.LastApplied);
+            // Capture deny payload BEFORE we mutate disk. Counts reflect
+            // ONLY the open delta (Accepted → LastApplied), so the denied
+            // row shows what got rolled back rather than the full
+            // accepted-plus-open history.
+            var counts = LineDiff.Compute(f.Accepted, f.LastApplied);
             var record = new DeniedChangeRecord
             {
                 Id = Guid.NewGuid().ToString("N"),
                 DeniedAt = DateTime.UtcNow,
-                ContentToReapply = f.LastApplied,
-                DiskContentAtDeny = f.Baseline,
+                ContentToReapply = f.LastApplied,    // pre-deny snapshot for redo
+                DiskContentAtDeny = f.Accepted,      // post-deny disk state (accepted preserved)
                 LinesAdded = counts.Added,
                 LinesRemoved = counts.Removed,
             };
 
             try
             {
-                File.WriteAllText(f.AbsolutePath, f.Baseline);
+                File.WriteAllText(f.AbsolutePath, f.Accepted);
             }
             catch (Exception ex)
             {
@@ -438,10 +430,14 @@ public sealed class ChangeTracker
                 return false;
             }
 
-            f.LastApplied = f.Baseline;
-            f.Accepted = f.Baseline;     // reset; may previously have equalled the old LastApplied
-            f.IsAccepted = false;
-            f.AcceptedHunks.Clear();     // whole-file revert wipes any per-hunk accepts too
+            f.LastApplied = f.Accepted;
+            // f.Accepted unchanged — accepted hunks remain spliced in.
+            // f.AcceptedHunks unchanged — the keys still match against
+            // diff(Baseline, new LastApplied=Accepted).
+            // f.IsAccepted reflects "everything on disk is accepted" now
+            // (since LastApplied == Accepted) — true iff there are any
+            // accepted hunks in this file.
+            f.IsAccepted = f.AcceptedHunks.Count > 0;
             f.Denied.Add(record);
             changed = true;
         }
@@ -551,6 +547,113 @@ public sealed class ChangeTracker
         }
         if (any) FireNotify(sessionId);
         return any;
+    }
+
+    /// <summary>
+    /// Folds a saved external edit into the file's tracker state under
+    /// the simplified "users only remove" model:
+    /// <list type="bullet">
+    ///   <item>Open hunks are allowed to grow / shrink to absorb user
+    ///   typing inside them.</item>
+    ///   <item>Accepted hunks the user hasn't touched stay accepted (key
+    ///   matches new-diff exactly).</item>
+    ///   <item>Anything else — user edits outside any hunk, edits that
+    ///   change an accepted hunk's content, edits in regions the model
+    ///   never touched — gets <b>absorbed into Baseline</b> silently. No
+    ///   "open" hunk surfaces for it; from the user's POV, that text is
+    ///   their own code now.</item>
+    /// </list>
+    /// Returns true if any tracked hunks remain after the fold.
+    /// </summary>
+    /// <remarks>
+    /// Splices into Baseline are processed in reverse OldStart order so
+    /// each splice's coords stay valid in the still-being-mutated
+    /// Baseline. <see cref="FileTracker.AcceptedHunks"/> entries whose
+    /// <see cref="HunkKey.BaselineStart"/> sits past a splice point get
+    /// shifted by <c>(NewLines.Count - OldCount)</c> so their keys still
+    /// resolve against the post-fold Baseline.
+    /// </remarks>
+    static bool ExtendProposalLocked(FileTracker f, string newDiskContent)
+    {
+        // Capture which hunks were OPEN before the fold — those are the
+        // only ones allowed to "absorb" user typing inside them.
+        var oldHunks = LineDiff.ComputeHunks(f.Baseline, f.LastApplied);
+        var openOldRanges = new List<(int Start, int Count)>();
+        foreach (var oh in oldHunks)
+        {
+            if (!f.AcceptedHunks.Contains(MakeKey(oh)))
+                openOldRanges.Add((oh.OldStart, oh.OldCount));
+        }
+
+        f.LastApplied = newDiskContent;
+        var newHunks = LineDiff.ComputeHunks(f.Baseline, f.LastApplied);
+
+        // Decide each new hunk: keep (model-authored, possibly extended
+        // by user typing) or absorb (user-only).
+        var toAbsorb = new List<LineDiff.Hunk>();
+        foreach (var nh in newHunks)
+        {
+            var key = MakeKey(nh);
+            // Identical accepted hunk passing through untouched.
+            if (f.AcceptedHunks.Contains(key)) continue;
+            // Open hunk extension — intersects an open old hunk's range.
+            bool intersectsOpen = false;
+            foreach (var (start, count) in openOldRanges)
+            {
+                if (RangesIntersect(nh.OldStart, nh.OldCount, start, count))
+                {
+                    intersectsOpen = true;
+                    break;
+                }
+            }
+            if (intersectsOpen) continue;
+            // Everything else: absorb.
+            toAbsorb.Add(nh);
+        }
+
+        // Splice in reverse so each splice's OldStart is still valid in
+        // the partially-updated Baseline.
+        toAbsorb.Sort((a, b) => b.OldStart.CompareTo(a.OldStart));
+        foreach (var h in toAbsorb)
+        {
+            f.Baseline = LineDiff.SpliceLines(f.Baseline, h.OldStart, h.OldCount, h.NewLines);
+            int delta = h.NewLines.Count - h.OldCount;
+            if (delta != 0 && f.AcceptedHunks.Count > 0)
+            {
+                int boundary = h.OldStart + h.OldCount;
+                var shifted = new HashSet<HunkKey>();
+                foreach (var k in f.AcceptedHunks)
+                {
+                    shifted.Add(k.BaselineStart >= boundary
+                        ? new HunkKey(k.BaselineStart + delta, k.BaselineCount, k.NewContent)
+                        : k);
+                }
+                f.AcceptedHunks.Clear();
+                foreach (var k in shifted) f.AcceptedHunks.Add(k);
+            }
+        }
+
+        // Stale accepted keys (e.g. user touched the accepted region —
+        // its content changed and the new-diff hunk has a different key)
+        // need pruning regardless. ApplyAcceptedHunks rebuilds the
+        // Accepted blob from the (possibly shifted) Baseline + survivors.
+        PruneStaleAcceptedHunksLocked(f);
+        f.Accepted = ApplyAcceptedHunks(f);
+        // IsAccepted ⇔ everything currently differing from baseline has
+        // been explicitly accepted, with at least one accepted hunk to
+        // show. After absorbing user edits this is rare but possible
+        // (e.g. user deleted what they added before save).
+        f.IsAccepted = string.Equals(f.Accepted, f.LastApplied, StringComparison.Ordinal)
+            && f.AcceptedHunks.Count > 0;
+
+        return f.HasProposal;
+    }
+
+    static bool RangesIntersect(int aStart, int aCount, int bStart, int bCount)
+    {
+        // Strict half-open interval intersection: [a, a+aCount) ∩ [b, b+bCount) ≠ ∅
+        // iff aStart < bStart+bCount && bStart < aStart+aCount.
+        return aStart < bStart + bCount && bStart < aStart + aCount;
     }
 
     // Drops AcceptedHunks entries that no longer correspond to a hunk in
@@ -802,37 +905,27 @@ public sealed class ChangeTracker
                 var removed = f.Denied.RemoveAll(
                     d => !string.Equals(d.DiskContentAtDeny, content, StringComparison.Ordinal));
 
-                //   (b) If the file has a live proposal (open hunks or
-                //       accepted hunks), the user is editing within the
-                //       model's edit set this turn — fold their changes
-                //       into the proposal by updating LastApplied. Two
-                //       follow-on effects:
-                //         • diff(Baseline, LastApplied) now includes the
-                //           user's lines, so an Accept/Reject from chat
-                //           or the editor covers them too.
-                //         • Accepted hunks whose new-side content the user
-                //           has touched get pruned by the content-aware
-                //           HunkKey — the accept marker drops naturally
-                //           for that hunk, per spec ("disappears for the
-                //           specific line if the user modifies the code").
-                //       The marker for an unmodified accepted hunk shifts
-                //       to its new line position because the snapshot's
-                //       CurrentStart/CurrentCount come straight from the
-                //       fresh diff — it follows the model's lines as the
-                //       user inserts/deletes around them.
-                bool extendedProposal = false;
-                if (f.HasProposal || f.AcceptedHunks.Count > 0)
+                //   (b) Partition-and-absorb. Hunks the user introduced
+                //       outside any open hunk (or by touching an accepted
+                //       hunk) are silently absorbed into Baseline so they
+                //       don't surface as "open" hunks the user has to
+                //       interact with. Only OPEN model hunks may extend
+                //       to swallow user edits inside them. Accepted hunks
+                //       that the user didn't touch keep their key and
+                //       their marker.
+                //
+                //       Rules per the simplified model:
+                //         • Only models create new hunks.
+                //         • Users may extend an open hunk by typing inside.
+                //         • Touching an accepted hunk drops its marker
+                //           and absorbs the region into Baseline (handled
+                //           via key-mismatch + absorb in this partition).
+                //         • All other user edits absorb silently — never
+                //           a new "open" hunk that wasn't authored by the
+                //           model.
+                bool extendedProposal = ExtendProposalLocked(f, content);
+                if (extendedProposal)
                 {
-                    f.LastApplied = content;
-                    PruneStaleAcceptedHunksLocked(f);
-                    f.Accepted = ApplyAcceptedHunks(f);
-                    // The user's edit means we're no longer in "everything
-                    // accepted" territory — even if every per-hunk accept
-                    // survived, the user's net-new lines are open until
-                    // they explicitly accept them.
-                    f.IsAccepted = string.Equals(f.Accepted, f.LastApplied, StringComparison.Ordinal)
-                        && f.AcceptedHunks.Count > 0;
-                    extendedProposal = true;
                     ExtensionLogger.Info("changes",
                         $"External edit on {absolutePath}: extended proposal "
                         + $"(dropped {removed}/{before} denial(s), {f.AcceptedHunks.Count} accepted hunk(s) survive)");
