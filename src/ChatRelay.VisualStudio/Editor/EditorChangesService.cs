@@ -5,118 +5,54 @@ using ChatRelay.Host;
 
 namespace ChatRelay.Editor;
 
-/// <summary>
-/// Per-process singleton bridging host-side <see cref="SessionChangesSnapshot"/>
-/// updates to the editor MEF components that need per-file hunk data
-/// (Phase 4.2+ adornment work).
-///
-/// <para>
-/// The chat <see cref="ChatRelay.Chat.ViewModels.ChatViewModel"/> already
-/// subscribes to <see cref="HostClient.ChangesUpdated"/> for its own
-/// file-level proposal list — it pushes the same snapshots into this
-/// service so editor-side consumers see hunks without each having to
-/// own its own RPC subscription. Subscribers fan out by absolute path:
-/// each editor-view manager listens for its own file's changes.
-/// </para>
-///
-/// <para>
-/// Lazy-static so MEF components instantiated at editor-view creation
-/// (potentially before the chat tool window opens) always get a real
-/// service object — they just see empty hunk lists until the host
-/// starts producing snapshots.
-/// </para>
-/// </summary>
+/// <summary>Per-process singleton bridging host snapshots to per-view editor MEF components. Subscribers filter by absolute path.</summary>
 public sealed class EditorChangesService
 {
     public static EditorChangesService Current { get; } = new();
 
     readonly object _sync = new();
-    readonly Dictionary<string, IReadOnlyList<HunkInfo>> _hunksByPath
-        = new(StringComparer.OrdinalIgnoreCase);
+    readonly Dictionary<string, IReadOnlyList<HunkInfo>> _hunksByPath = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>
-    /// Session id from the most recent snapshot ingested. The editor
-    /// adornment uses this when relaying accept/reject button clicks
-    /// back to the host — the host's per-hunk RPCs are session-scoped.
-    /// </summary>
+    /// <summary>Session id from the most recent snapshot. Editor adornments use it when forwarding accept/reject clicks.</summary>
     public string? CurrentSessionId { get; private set; }
 
-    /// <summary>
-    /// Sent by ChatViewModel at host-startup time. Editor adornments
-    /// invoke this to forward an accept-hunk click without needing
-    /// their own HostClient reference. Args: sessionId, filePath,
-    /// baselineStart, baselineCount.
-    /// </summary>
+    /// <summary>Set by ChatViewModel at host-startup. Args: sessionId, filePath, baselineStart, baselineCount.</summary>
     public Func<string, string, int, int, Task>? AcceptHunkAsync { get; set; }
-
-    /// <summary>Like <see cref="AcceptHunkAsync"/> but for reject clicks.</summary>
     public Func<string, string, int, int, Task>? RejectHunkAsync { get; set; }
 
-    /// <summary>
-    /// Editor-initiated invalidation of an accepted hunk's marker. Fired
-    /// when the user types within an accepted hunk's tracked line range —
-    /// the buffer change hasn't reached disk yet, but the marker should
-    /// drop immediately. Same arg shape as the accept/reject callbacks.
-    /// </summary>
+    /// <summary>Wire-only no-op kept for compatibility — accepts now fold into baseline so there's no marker to invalidate.</summary>
     public Func<string, string, int, int, Task>? InvalidateAcceptedHunkAsync { get; set; }
 
-    /// <summary>
-    /// Fires when the hunk list for the given absolute path changes —
-    /// either updated, replaced, or cleared (file no longer in any
-    /// proposal). Subscribers filter on the path argument; we don't
-    /// per-path-key the events to keep the service simple.
-    /// </summary>
+    /// <summary>Fires when the hunk list for an absolute path changes (added, replaced, or removed).</summary>
     public event Action<string>? HunksChanged;
 
-    /// <summary>
-    /// Returns the latest hunks for <paramref name="absolutePath"/>, or an
-    /// empty list if the file isn't currently in any proposal. Safe to
-    /// call from any thread.
-    /// </summary>
     public IReadOnlyList<HunkInfo> GetHunks(string absolutePath)
     {
         if (string.IsNullOrEmpty(absolutePath)) return Array.Empty<HunkInfo>();
         lock (_sync)
-        {
-            return _hunksByPath.TryGetValue(absolutePath, out var hunks)
-                ? hunks
-                : Array.Empty<HunkInfo>();
-        }
+            return _hunksByPath.TryGetValue(absolutePath, out var hunks) ? hunks : Array.Empty<HunkInfo>();
     }
 
-    /// <summary>
-    /// Reconciles the cache against the latest host snapshot. Diffs the
-    /// new state against the prior, fires <see cref="HunksChanged"/> for
-    /// every path whose hunk set changed (added, replaced, or removed).
-    /// Called from <see cref="ChatRelay.Chat.ViewModels.ChatViewModel"/>'s
-    /// snapshot-ingest path so chat and editor views observe the same
-    /// data at the same time.
-    /// </summary>
+    /// <summary>Reconciles the cache against a host snapshot, firing HunksChanged for every path whose hunks actually differ.</summary>
     public void Update(SessionChangesSnapshot snapshot)
     {
         if (snapshot is null) return;
-
         CurrentSessionId = snapshot.SessionId;
 
         var changedPaths = new List<string>();
         lock (_sync)
         {
-            // Build the new map keyed by path; track which paths have
-            // genuinely changed so we don't fire spurious events on
-            // re-renders of the same hunk list.
             var newSeen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var p in snapshot.Proposals)
             {
                 newSeen.Add(p.AbsolutePath);
                 var newHunks = p.Hunks ?? Array.Empty<HunkInfo>();
-                if (!_hunksByPath.TryGetValue(p.AbsolutePath, out var existing)
-                    || !HunksEqual(existing, newHunks))
+                if (!_hunksByPath.TryGetValue(p.AbsolutePath, out var existing) || !HunksEqual(existing, newHunks))
                 {
                     _hunksByPath[p.AbsolutePath] = newHunks;
                     changedPaths.Add(p.AbsolutePath);
                 }
             }
-            // Drop entries whose file is no longer in any proposal.
             foreach (var path in new List<string>(_hunksByPath.Keys))
             {
                 if (!newSeen.Contains(path))
@@ -132,14 +68,11 @@ public sealed class EditorChangesService
         foreach (var path in changedPaths)
         {
             try { handler(path); }
-            catch { /* subscriber threw — don't poison the rest */ }
+            catch { }
         }
     }
 
-    /// <summary>
-    /// Clears all cached hunks. Called when the session changes or the
-    /// host disconnects so editor views don't keep stale state.
-    /// </summary>
+    /// <summary>Clears cached hunks; called on session change or host disconnect.</summary>
     public void ClearAll()
     {
         List<string> wereTracked;
@@ -163,10 +96,8 @@ public sealed class EditorChangesService
         for (int i = 0; i < a.Count; i++)
         {
             var x = a[i]; var y = b[i];
-            if (x.BaselineStart != y.BaselineStart) return false;
-            if (x.BaselineCount != y.BaselineCount) return false;
-            if (x.CurrentStart != y.CurrentStart) return false;
-            if (x.CurrentCount != y.CurrentCount) return false;
+            if (x.BaselineStart != y.BaselineStart || x.BaselineCount != y.BaselineCount) return false;
+            if (x.CurrentStart != y.CurrentStart || x.CurrentCount != y.CurrentCount) return false;
             if (x.State != y.State) return false;
             if (!LinesEqual(x.BaselineLines, y.BaselineLines)) return false;
             if (!LinesEqual(x.CurrentLines, y.CurrentLines)) return false;

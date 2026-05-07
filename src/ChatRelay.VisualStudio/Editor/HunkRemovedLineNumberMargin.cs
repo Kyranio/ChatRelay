@@ -1,6 +1,5 @@
 using System;
 using System.ComponentModel.Composition;
-using System.Diagnostics;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -12,7 +11,7 @@ using Microsoft.VisualStudio.Utilities;
 
 namespace ChatRelay.Editor;
 
-/// <summary>Provides a sibling margin to LineNumber that shows the original baseline line numbers for the removed-line strips.</summary>
+/// <summary>Sibling margin to LineNumber that paints baseline line numbers in the gap reserved by HunkRemovedLinesTagger.</summary>
 [Export(typeof(IWpfTextViewMarginProvider))]
 [Name(HunkRemovedLineNumberMargin.MarginName)]
 [Order(After = PredefinedMarginNames.LineNumber)]
@@ -28,7 +27,6 @@ public sealed class HunkRemovedLineNumberMarginProvider : IWpfTextViewMarginProv
         new HunkRemovedLineNumberMargin(host.TextView, FormatMapService.GetClassificationFormatMap(host.TextView));
 }
 
-/// <summary>Paints baseline line numbers in the gap that <see cref="HunkRemovedLinesTagger"/> reserves above each open-hunk anchor line.</summary>
 internal sealed class HunkRemovedLineNumberMargin : Canvas, IWpfTextViewMargin
 {
     public const string MarginName = "ChatRelayHunkRemovedLineNumbers";
@@ -77,7 +75,7 @@ internal sealed class HunkRemovedLineNumberMargin : Canvas, IWpfTextViewMargin
 
     void OnHunksChanged(string changedPath)
     {
-        if (_filePath is null) _filePath = ResolveFilePath(_view);
+        _filePath ??= ResolveFilePath(_view);
         if (_filePath is null) return;
         if (!string.Equals(changedPath, _filePath, StringComparison.OrdinalIgnoreCase)) return;
         Render();
@@ -91,7 +89,7 @@ internal sealed class HunkRemovedLineNumberMargin : Canvas, IWpfTextViewMargin
         Children.Clear();
         if (_disposed) return;
 
-        if (_filePath is null) _filePath = ResolveFilePath(_view);
+        _filePath ??= ResolveFilePath(_view);
         if (_filePath is null) { Width = 0; return; }
 
         var hunks = _service.GetHunks(_filePath);
@@ -104,12 +102,10 @@ internal sealed class HunkRemovedLineNumberMargin : Canvas, IWpfTextViewMargin
         double lineHeight = _view.LineHeight > 0 ? _view.LineHeight : 16;
         double columnWidth = _view.FormattedLineSource?.ColumnWidth ?? (fontSize * 0.6);
 
-        // Width = enough columns to fit the largest visible removed-line number, plus a small right gap.
         int maxDigits = 1;
         foreach (var h in hunks)
         {
             if (h.BaselineLines.Count == 0) continue;
-            if (string.Equals(h.State, "accepted", StringComparison.Ordinal)) continue;
             int max = h.BaselineStart + h.BaselineLines.Count;
             int digits = max < 10 ? 1 : max < 100 ? 2 : max < 1000 ? 3 : max < 10000 ? 4 : 5;
             if (digits > maxDigits) maxDigits = digits;
@@ -119,15 +115,11 @@ internal sealed class HunkRemovedLineNumberMargin : Canvas, IWpfTextViewMargin
         foreach (var h in hunks)
         {
             if (h.BaselineLines.Count == 0) continue;
-            if (string.Equals(h.State, "accepted", StringComparison.Ordinal)) continue;
 
             int anchorLine = h.CurrentStart;
             if (anchorLine < 0 || anchorLine >= snapshot.LineCount) continue;
 
-            // Mirror the tagger's anchor choice: when the hunk doesn't start
-            // on line 0, the strip is reserved BELOW line N-1 (so it lands
-            // above any CodeLens row VS may insert above line N). Otherwise
-            // it falls back to the above-line-N placement.
+            // Mirror HunkRemovedLinesTagger: anchor on N-1 with bottom-space, fall back to above-line-0 at file top.
             SnapshotPoint anchorPos;
             bool isAboveLine;
             if (anchorLine > 0)
@@ -144,28 +136,12 @@ internal sealed class HunkRemovedLineNumberMargin : Canvas, IWpfTextViewMargin
             var view = _view.TextViewLines.GetTextViewLineContainingBufferPosition(anchorPos);
             if (view is null) continue;
 
-            // ITextViewLine.Top / TextTop / TextBottom / Bottom are in buffer
-            // coordinates (the adornment-layer canvas applies the scroll
-            // transform implicitly). Our margin's Canvas sits OUTSIDE that
-            // transform, so we must subtract ViewportTop ourselves — without
-            // it the numbers stay pinned to the document position they had at
-            // first paint and visibly stick to the screen as the user scrolls.
-            double reservedTop, reservedHeight;
-            if (isAboveLine)
-            {
-                // Gap = [Top, TextTop] above the anchor line.
-                reservedTop = view.Top - _view.ViewportTop;
-                reservedHeight = view.TextTop - view.Top;
-            }
-            else
-            {
-                // Gap = [TextBottom, Bottom] below the anchor line.
-                reservedTop = view.TextBottom - _view.ViewportTop;
-                reservedHeight = view.Bottom - view.TextBottom;
-            }
+            // ITextViewLine coordinates are in buffer space. Adornment layers absorb the scroll transform implicitly;
+            // this margin's Canvas sits outside that transform, so subtract ViewportTop ourselves or numbers stick on scroll.
+            double reservedTop = isAboveLine ? view.Top - _view.ViewportTop : view.TextBottom - _view.ViewportTop;
+            double reservedHeight = isAboveLine ? view.TextTop - view.Top : view.Bottom - view.TextBottom;
             if (reservedHeight < lineHeight - 2) continue;
 
-            // Each baseline line gets one editor-line-height row inside the reserved gap.
             for (int i = 0; i < h.BaselineLines.Count; i++)
             {
                 var tb = new TextBlock
@@ -181,19 +157,15 @@ internal sealed class HunkRemovedLineNumberMargin : Canvas, IWpfTextViewMargin
                     Width = Width - 4,
                 };
                 SetLeft(tb, 0);
-                // Match the strip's own VerticalPadding so the numbers line up with the strip's text rows.
+                // +2 matches the strip's own VerticalPadding so numbers align with strip rows.
                 SetTop(tb, reservedTop + i * lineHeight + 2);
                 Children.Add(tb);
             }
         }
     }
 
-    static string? ResolveFilePath(IWpfTextView view)
-    {
-        if (view.TextBuffer.Properties.TryGetProperty<ITextDocument>(typeof(ITextDocument), out var doc))
-            return doc.FilePath;
-        return null;
-    }
+    static string? ResolveFilePath(IWpfTextView view) =>
+        view.TextBuffer.Properties.TryGetProperty<ITextDocument>(typeof(ITextDocument), out var doc) ? doc.FilePath : null;
 
     static Brush Frozen(SolidColorBrush b) { b.Freeze(); return b; }
 }
