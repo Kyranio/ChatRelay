@@ -15,14 +15,9 @@ namespace ChatRelay.Editor;
 
 /// <summary>
 /// Renders the "removed lines" inline block via VS's
-/// <see cref="InterLineAdornmentTag"/> primitive — the same mechanism
-/// CodeLens / inline references use to inject vertical space between
-/// source rows. VS reserves the gap, picks the anchor line, and
-/// positions the adornment for us. Replaces the earlier manual
-/// <c>ILineTransformSource + adornment</c> approach which suffered
-/// from race conditions between top-space updates and adornment
-/// painting (multiple hunks would stack at stale Y positions until a
-/// subsequent layout pass).
+/// <see cref="InterLineAdornmentTag"/> primitive — VS reserves the gap
+/// AND positions the adornment for us, so we don't have to manage
+/// LineTransform reservations or Canvas Y coordinates ourselves.
 /// </summary>
 [Export(typeof(IViewTaggerProvider))]
 [ContentType("text")]
@@ -33,8 +28,7 @@ public sealed class HunkRemovedLinesTaggerProvider : IViewTaggerProvider
     public ITagger<T>? CreateTagger<T>(ITextView textView, ITextBuffer buffer) where T : ITag
     {
         if (textView is not IWpfTextView wpf) return null;
-        // Per-buffer-view scoping — only attach if the requested buffer is
-        // the view's primary buffer (not a projection / preview / etc.).
+        // Only attach to the view's primary buffer (skip projections / peek).
         if (textView.TextBuffer != buffer) return null;
         var tagger = wpf.Properties.GetOrCreateSingletonProperty(
             typeof(HunkRemovedLinesTagger),
@@ -43,30 +37,17 @@ public sealed class HunkRemovedLinesTaggerProvider : IViewTaggerProvider
     }
 }
 
-/// <summary>
-/// Per-view tagger that emits one <see cref="InterLineAdornmentTag"/>
-/// per open hunk that has removed-side content (model deleted lines).
-/// VS handles space reservation and rendering placement automatically;
-/// we just provide the tag's anchor SnapshotSpan, the height to
-/// reserve, and a factory that creates the red TextBox.
-/// </summary>
 internal sealed class HunkRemovedLinesTagger : ITagger<InterLineAdornmentTag>
 {
-    // Translucent red — same hue family as the previous block style.
     static readonly Brush RemovedFill = Frozen(new SolidColorBrush(Color.FromArgb(0x40, 0xE0, 0x40, 0x40)));
     static readonly Brush RemovedText = Frozen(new SolidColorBrush(Color.FromRgb(0xCB, 0x6E, 0x6E)));
 
-    // Vertical breathing room around the inline block's text.
     const double VerticalPadding = 2;
 
-    // Per-line height used when reserving InterLineAdornmentTag space.
-    // The editor's IWpfTextView.LineHeight reports the EDITOR's per-line
-    // pixel height, but our adornment is a WPF TextBox using FontSize 12
-    // which renders at ~16px/line regardless. Reserving editor-line-height
-    // pixels leaves the TextBox short on space and only the first line
-    // of multi-line content is visible — the rest gets clipped inside
-    // the reserved gap. Reserve at least this many pixels per line so
-    // the WPF rendering always fits.
+    // Floor for per-line reserved height. _view.LineHeight is the editor's
+    // glyph height; our WPF TextBox at FontSize 12 needs ~16-18px per
+    // line. Without a floor, multi-line removed-blocks clip everything
+    // past line 1 inside the gap.
     const double MinLineHeight = 18;
 
     readonly IWpfTextView _view;
@@ -93,48 +74,37 @@ internal sealed class HunkRemovedLinesTagger : ITagger<InterLineAdornmentTag>
         if (hunks.Count == 0) yield break;
 
         var snapshot = spans[0].Snapshot;
-        // Use whichever is taller: the editor's reported line height or
-        // our floor for WPF TextBox rendering. Otherwise multi-line
-        // removed-blocks clip everything past line 1.
         var editorLineHeight = _view.LineHeight > 0 ? _view.LineHeight : 16;
         var lineHeight = Math.Max(editorLineHeight, MinLineHeight);
 
         foreach (var h in hunks)
         {
             if (h.BaselineLines.Count == 0) continue;
-            // Accepted hunks have no inline block — only the marker bar
-            // (rendered separately by HunkAdornmentManager).
+            // Accepted hunks render only as the marker bar (separately, in
+            // HunkAdornmentManager); no inline removed-block.
             if (string.Equals(h.State, "accepted", StringComparison.Ordinal)) continue;
 
             int anchorLine = h.CurrentStart;
             if (anchorLine < 0 || anchorLine >= snapshot.LineCount) continue;
 
             var anchorPos = snapshot.GetLineFromLineNumber(anchorLine).Start;
-            // Tag span: zero-width point at the anchor line. VS uses this
-            // to decide where to reserve the gap; the tag is included
-            // when the requested span set intersects the point.
             var tagSpan = new SnapshotSpan(anchorPos, 0);
-            bool inRange = false;
-            foreach (var s in spans)
-            {
-                if (s.IntersectsWith(tagSpan)) { inRange = true; break; }
-            }
-            if (!inRange) continue;
+            if (!AnyIntersects(spans, tagSpan)) continue;
 
             double height = h.BaselineLines.Count * lineHeight + VerticalPadding * 2;
-            var captured = h;     // closure capture
+            var captured = h;
             InterLineAdornmentFactory factory = (tag, view, position) =>
                 BuildAdornment(captured, tag.Height);
 
-            var iltag = new InterLineAdornmentTag(
-                adornmentFactory: factory,
-                isAboveLine: true,
-                initialHeight: height,
-                horizontalPositioningMode: HorizontalPositioningMode.ViewRelative,
-                horizontalOffset: 0,
-                removalCallback: null);
-
-            yield return new TagSpan<InterLineAdornmentTag>(tagSpan, iltag);
+            yield return new TagSpan<InterLineAdornmentTag>(
+                tagSpan,
+                new InterLineAdornmentTag(
+                    adornmentFactory: factory,
+                    isAboveLine: true,
+                    initialHeight: height,
+                    horizontalPositioningMode: HorizontalPositioningMode.ViewRelative,
+                    horizontalOffset: 0,
+                    removalCallback: null));
         }
     }
 
@@ -147,8 +117,6 @@ internal sealed class HunkRemovedLinesTagger : ITagger<InterLineAdornmentTag>
             IsReadOnlyCaretVisible = false,
             BorderThickness = new Thickness(0),
             Background = Brushes.Transparent,
-            // Inner gutter so the lines don't hug the left edge or the
-            // top/bottom of the red strip.
             Padding = new Thickness(8, VerticalPadding, 4, VerticalPadding),
             FontFamily = new FontFamily("Consolas, Lucida Sans Typewriter, Courier New"),
             FontSize = 12,
@@ -173,16 +141,13 @@ internal sealed class HunkRemovedLinesTagger : ITagger<InterLineAdornmentTag>
 
     void OnHunksChanged(string changedPath)
     {
-        if (_filePath is null) return;
         if (!string.Equals(changedPath, _filePath, StringComparison.OrdinalIgnoreCase)) return;
-        // Hunk set changed — invalidate all tags and let VS re-call
-        // GetTags for the visible spans. The new tags will reflect the
-        // updated hunks and VS will reposition / re-reserve gaps as
-        // needed.
         var snapshot = _view.TextSnapshot;
         if (snapshot.Length == 0) return;
-        var span = new SnapshotSpan(snapshot, 0, snapshot.Length);
-        try { TagsChanged?.Invoke(this, new SnapshotSpanEventArgs(span)); }
+        // Invalidate tags across the full snapshot — the host doesn't
+        // tell us which lines changed, so let VS re-call GetTags for the
+        // visible spans.
+        try { TagsChanged?.Invoke(this, new SnapshotSpanEventArgs(new SnapshotSpan(snapshot, 0, snapshot.Length))); }
         catch (Exception ex)
         {
             Debug.WriteLine($"[ChatRelay.editor] TagsChanged fire failed: {ex.Message}");
@@ -193,6 +158,13 @@ internal sealed class HunkRemovedLinesTagger : ITagger<InterLineAdornmentTag>
     {
         _service.HunksChanged -= OnHunksChanged;
         _view.Closed -= OnViewClosed;
+    }
+
+    static bool AnyIntersects(NormalizedSnapshotSpanCollection spans, SnapshotSpan needle)
+    {
+        foreach (var s in spans)
+            if (s.IntersectsWith(needle)) return true;
+        return false;
     }
 
     static string? ResolveFilePath(IWpfTextView view)

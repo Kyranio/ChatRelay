@@ -341,24 +341,7 @@ public sealed class ChangeTracker
             // hunk's baseline position. Baseline now matches what's on
             // disk for this region.
             f.Baseline = LineDiff.SpliceLines(f.Baseline, baselineStart, baselineCount, hunk.NewLines);
-
-            // Shift the BaselineStart of any other accepted hunks that
-            // sit AFTER the spliced region. delta = how many lines
-            // Baseline gained (or lost) by the splice.
-            int delta = hunk.NewLines.Count - hunk.OldCount;
-            if (delta != 0 && f.AcceptedHunks.Count > 0)
-            {
-                int boundary = baselineStart + baselineCount;
-                var shifted = new HashSet<HunkKey>();
-                foreach (var k in f.AcceptedHunks)
-                {
-                    shifted.Add(k.BaselineStart >= boundary
-                        ? new HunkKey(k.BaselineStart + delta, k.BaselineCount, k.NewContent)
-                        : k);
-                }
-                f.AcceptedHunks.Clear();
-                foreach (var k in shifted) f.AcceptedHunks.Add(k);
-            }
+            ShiftAcceptedHunksAfterLocked(f, baselineStart + baselineCount, hunk.NewLines.Count - hunk.OldCount);
 
             // Re-derive Accepted from the updated Baseline + remaining
             // accepted hunks. Note: this hunk's contribution is already
@@ -398,13 +381,14 @@ public sealed class ChangeTracker
 
     static string JoinLines(IReadOnlyList<string> lines) => string.Join("\n", lines);
 
-    // Maps a Baseline-line-number to its corresponding line in Accepted, by
-    // walking ALL hunks the model produced (in baseline order) and shifting
-    // for those the user has accepted that lie strictly before the target.
+    // Maps a Baseline-line-number to its corresponding line in Accepted by
+    // walking ALL hunks the model produced and shifting for those the user
+    // has accepted that lie strictly before the target. ComputeHunks
+    // already returns hunks in OldStart order so no sort is needed.
     static int ProjectBaselineToAccepted(FileTracker f, IReadOnlyList<LineDiff.Hunk> hunks, int baselineStart)
     {
         int projected = baselineStart;
-        foreach (var h in hunks.OrderBy(x => x.OldStart))
+        foreach (var h in hunks)
         {
             if (h.OldStart >= baselineStart) break;
             if (f.AcceptedHunks.Contains(MakeKey(h)))
@@ -478,36 +462,36 @@ public sealed class ChangeTracker
             if (record is null) return false;
 
             // Refuse if the file's drifted from the post-deny state. The
-            // workspace watcher catches most of these proactively, but this
-            // belt-and-braces re-read defends against the watcher missing
-            // an event (buffer overflow, unsupported file system, …).
+            // workspace watcher catches most drift proactively, but this
+            // belt-and-braces re-read defends against missed events.
             string current;
             try { current = File.ReadAllText(f.AbsolutePath); }
             catch { return false; }
+
             if (!string.Equals(current, record.DiskContentAtDeny, StringComparison.Ordinal))
             {
                 // Drop the now-meaningless entry. Spec: "the removed changes
                 // will be cleared from the session file."
                 f.Denied.Remove(record);
                 changed = true;
-                goto done;
             }
-
-            try { File.WriteAllText(f.AbsolutePath, record.ContentToReapply); }
-            catch (Exception ex)
+            else
             {
-                ExtensionLogger.Warn("changes", $"Redo write failed for {f.AbsolutePath}: {ex.Message}");
-                return false;
-            }
+                try { File.WriteAllText(f.AbsolutePath, record.ContentToReapply); }
+                catch (Exception ex)
+                {
+                    ExtensionLogger.Warn("changes", $"Redo write failed for {f.AbsolutePath}: {ex.Message}");
+                    return false;
+                }
 
-            // Re-applying lifts the file back to a proposal state. We do
-            // NOT re-mark it accepted — the user has to decide again.
-            f.LastApplied = record.ContentToReapply;
-            f.IsAccepted = false;
-            f.Denied.Remove(record);
-            changed = true;
+                // Re-applying lifts the file back to a proposal state. We do
+                // NOT re-mark it accepted — the user has to decide again.
+                f.LastApplied = record.ContentToReapply;
+                f.IsAccepted = false;
+                f.Denied.Remove(record);
+                changed = true;
+            }
         }
-        done:
         if (changed) FireNotify(sessionId);
         return changed;
     }
@@ -639,20 +623,7 @@ public sealed class ChangeTracker
         foreach (var h in toAbsorb)
         {
             f.Baseline = LineDiff.SpliceLines(f.Baseline, h.OldStart, h.OldCount, h.NewLines);
-            int delta = h.NewLines.Count - h.OldCount;
-            if (delta != 0 && f.AcceptedHunks.Count > 0)
-            {
-                int boundary = h.OldStart + h.OldCount;
-                var shifted = new HashSet<HunkKey>();
-                foreach (var k in f.AcceptedHunks)
-                {
-                    shifted.Add(k.BaselineStart >= boundary
-                        ? new HunkKey(k.BaselineStart + delta, k.BaselineCount, k.NewContent)
-                        : k);
-                }
-                f.AcceptedHunks.Clear();
-                foreach (var k in shifted) f.AcceptedHunks.Add(k);
-            }
+            ShiftAcceptedHunksAfterLocked(f, h.OldStart + h.OldCount, h.NewLines.Count - h.OldCount);
         }
 
         // Stale accepted keys (e.g. user touched the accepted region —
@@ -676,6 +647,25 @@ public sealed class ChangeTracker
         // Strict half-open interval intersection: [a, a+aCount) ∩ [b, b+bCount) ≠ ∅
         // iff aStart < bStart+bCount && bStart < aStart+aCount.
         return aStart < bStart + bCount && bStart < aStart + aCount;
+    }
+
+    // Shifts the BaselineStart of any AcceptedHunks key whose start sits
+    // at or past <paramref name="boundary"/> by <paramref name="delta"/>
+    // lines. Called after splicing into Baseline so existing keys remain
+    // resolvable against the new Baseline coords. No-op when delta is 0
+    // or there's nothing to shift.
+    static void ShiftAcceptedHunksAfterLocked(FileTracker f, int boundary, int delta)
+    {
+        if (delta == 0 || f.AcceptedHunks.Count == 0) return;
+        var shifted = new HashSet<HunkKey>();
+        foreach (var k in f.AcceptedHunks)
+        {
+            shifted.Add(k.BaselineStart >= boundary
+                ? new HunkKey(k.BaselineStart + delta, k.BaselineCount, k.NewContent)
+                : k);
+        }
+        f.AcceptedHunks.Clear();
+        foreach (var k in shifted) f.AcceptedHunks.Add(k);
     }
 
     // Drops AcceptedHunks entries that no longer correspond to a hunk in
