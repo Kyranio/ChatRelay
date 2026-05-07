@@ -49,6 +49,14 @@ public sealed class ChatViewModel : INotifyPropertyChanged
     /// </summary>
     public ObservableCollection<DenialItem> Denials { get; } = new();
 
+    int _openLinesAdded, _openLinesRemoved, _acceptedLinesAdded, _acceptedLinesRemoved;
+    /// <summary>Sum of LinesAdded across all currently-open proposals. Recomputed on every snapshot ingest.</summary>
+    public int OpenLinesAdded { get => _openLinesAdded; private set { if (_openLinesAdded != value) { _openLinesAdded = value; Raise(nameof(OpenLinesAdded)); } } }
+    public int OpenLinesRemoved { get => _openLinesRemoved; private set { if (_openLinesRemoved != value) { _openLinesRemoved = value; Raise(nameof(OpenLinesRemoved)); } } }
+    /// <summary>Cumulative lines accepted in this session, broadcast by the host. Volatile; cleared on session switch.</summary>
+    public int AcceptedLinesAdded { get => _acceptedLinesAdded; private set { if (_acceptedLinesAdded != value) { _acceptedLinesAdded = value; Raise(nameof(AcceptedLinesAdded)); } } }
+    public int AcceptedLinesRemoved { get => _acceptedLinesRemoved; private set { if (_acceptedLinesRemoved != value) { _acceptedLinesRemoved = value; Raise(nameof(AcceptedLinesRemoved)); } } }
+
     private ChatSession? _currentSession;
     public ChatSession? CurrentSession
     {
@@ -374,6 +382,7 @@ public sealed class ChatViewModel : INotifyPropertyChanged
         // Home state has no session; the changes lists belong to no one.
         Proposals.Clear();
         Denials.Clear();
+        OpenLinesAdded = OpenLinesRemoved = AcceptedLinesAdded = AcceptedLinesRemoved = 0;
         HomeStateEntered?.Invoke();
     }
 
@@ -610,7 +619,8 @@ public sealed class ChatViewModel : INotifyPropertyChanged
                     AbsolutePath = p.AbsolutePath,
                     LinesAdded = p.LinesAdded,
                     LinesRemoved = p.LinesRemoved,
-                    State = p.State,
+                    AcceptedLinesAdded = p.AcceptedLinesAdded,
+                    AcceptedLinesRemoved = p.AcceptedLinesRemoved,
                 });
             }
             else
@@ -618,7 +628,8 @@ public sealed class ChatViewModel : INotifyPropertyChanged
                 existing.FilePath = p.FilePath;
                 existing.LinesAdded = p.LinesAdded;
                 existing.LinesRemoved = p.LinesRemoved;
-                existing.State = p.State;
+                existing.AcceptedLinesAdded = p.AcceptedLinesAdded;
+                existing.AcceptedLinesRemoved = p.AcceptedLinesRemoved;
             }
         }
         for (int i = Proposals.Count - 1; i >= 0; i--)
@@ -661,6 +672,13 @@ public sealed class ChatViewModel : INotifyPropertyChanged
             if (!seenDenials.Contains(Denials[i].Id))
                 Denials.RemoveAt(i);
 
+        int openAdded = 0, openRemoved = 0;
+        foreach (var p in Proposals) { openAdded += p.LinesAdded; openRemoved += p.LinesRemoved; }
+        OpenLinesAdded = openAdded;
+        OpenLinesRemoved = openRemoved;
+        AcceptedLinesAdded = snapshot.AcceptedLinesAdded;
+        AcceptedLinesRemoved = snapshot.AcceptedLinesRemoved;
+
         if (wasEmpty && Proposals.Count > 0)
             ProposalsBecameNonEmpty?.Invoke();
     }
@@ -692,6 +710,7 @@ public sealed class ChatViewModel : INotifyPropertyChanged
         {
             Proposals.Clear();
             Denials.Clear();
+            OpenLinesAdded = OpenLinesRemoved = AcceptedLinesAdded = AcceptedLinesRemoved = 0;
             Editor.EditorChangesService.Current.ClearAll();
             return;
         }
@@ -711,6 +730,7 @@ public sealed class ChatViewModel : INotifyPropertyChanged
             await UiThread.SwitchToUi();
             Proposals.Clear();
             Denials.Clear();
+            OpenLinesAdded = OpenLinesRemoved = AcceptedLinesAdded = AcceptedLinesRemoved = 0;
             Editor.EditorChangesService.Current.ClearAll();
         }
     }

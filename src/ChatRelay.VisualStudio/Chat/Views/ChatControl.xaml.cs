@@ -6,6 +6,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Data;
 using System.Windows.Documents;
 using System.Windows.Input;
@@ -145,7 +146,27 @@ public partial class ChatControl : UserControl
                 DeleteSessionButton.IsEnabled = enabled;
                 SendButton.IsEnabled = enabled;
                 break;
+            case nameof(ChatViewModel.OpenLinesAdded):
+            case nameof(ChatViewModel.OpenLinesRemoved):
+            case nameof(ChatViewModel.AcceptedLinesAdded):
+            case nameof(ChatViewModel.AcceptedLinesRemoved):
+                UpdateChangesHeader();
+                break;
         }
+    }
+
+    void UpdateChangesHeader()
+    {
+        var sb = new System.Text.StringBuilder();
+        if (_vm.OpenLinesAdded > 0 || _vm.OpenLinesRemoved > 0)
+            sb.Append($"open +{_vm.OpenLinesAdded} −{_vm.OpenLinesRemoved}");
+        if (_vm.AcceptedLinesAdded > 0 || _vm.AcceptedLinesRemoved > 0)
+        {
+            if (sb.Length > 0) sb.Append("  ·  ");
+            sb.Append($"accepted +{_vm.AcceptedLinesAdded} −{_vm.AcceptedLinesRemoved}");
+        }
+        ChangesHeaderCounters.Text = sb.ToString();
+        ChangesHeader.Visibility = sb.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     async Task StartHostAsync()
@@ -1195,22 +1216,21 @@ public partial class ChatControl : UserControl
     {
         content.Children.Clear();
 
-        // Two left-side floating buttons per spec: accept (✓) and undo (↶).
-        // Accept hides once the row has been accepted; undo always stays
-        // so the user can revert even after accepting.
+        // Both buttons hide once everything's accepted — nothing left to accept or undo on this file.
         var accept = new Button
         {
-            Content = "✓",                 // ✓
+            Content = "✓",
             ToolTip = "Accept this change",
             Style = (Style)FindResource("ChangeRowButtonStyle"),
-            Visibility = item.IsAccepted ? Visibility.Collapsed : Visibility.Visible,
+            Visibility = item.HasOpenChanges ? Visibility.Visible : Visibility.Collapsed,
         };
         accept.Click += async (_, _) => await _vm.AcceptChangeAsync(item);
         var undo = new Button
         {
-            Content = "↶",                 // ↶
-            ToolTip = item.IsAccepted ? "Undo this change (already accepted)" : "Undo this change",
+            Content = "↶",
+            ToolTip = "Undo this change",
             Style = (Style)FindResource("ChangeRowButtonStyle"),
+            Visibility = item.HasOpenChanges ? Visibility.Visible : Visibility.Collapsed,
         };
         undo.Click += async (_, _) => await _vm.DenyChangeAsync(item);
 
@@ -1237,47 +1257,35 @@ public partial class ChatControl : UserControl
         };
         content.Children.Add(path);
 
-        // +N / −M counts. Skip zero-counts so a pure-add or pure-remove
-        // edit isn't visually padded with "+0" / "-0".
-        if (item.LinesAdded > 0)
-        {
-            var add = new TextBlock
-            {
-                Text = "+" + item.LinesAdded,
-                FontFamily = new FontFamily("Consolas"),
-                FontSize = 11,
-                Foreground = Frozen(Color.FromRgb(0x2E, 0xCC, 0x71)),
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(0, 0, 4, 0),
-            };
-            content.Children.Add(add);
-        }
-        if (item.LinesRemoved > 0)
-        {
-            var rem = new TextBlock
-            {
-                Text = "−" + item.LinesRemoved,    // unicode minus, lines up with +
-                FontFamily = new FontFamily("Consolas"),
-                FontSize = 11,
-                Foreground = Frozen(Color.FromRgb(0xC0, 0x39, 0x2B)),
-                VerticalAlignment = VerticalAlignment.Center,
-            };
-            content.Children.Add(rem);
-        }
+        // Open diff (bright) followed by accepted history (dimmed) so the row always shows totals.
+        AddCount(content, item.LinesAdded, "+", Frozen(Color.FromRgb(0x2E, 0xCC, 0x71)), 1.0);
+        AddCount(content, item.LinesRemoved, "−", Frozen(Color.FromRgb(0xC0, 0x39, 0x2B)), 1.0);
+        AddCount(content, item.AcceptedLinesAdded, "+", Frozen(Color.FromRgb(0x2E, 0xCC, 0x71)), 0.55);
+        AddCount(content, item.AcceptedLinesRemoved, "−", Frozen(Color.FromRgb(0xC0, 0x39, 0x2B)), 0.55);
+    }
 
-        if (item.IsAccepted)
+    // Drag up grows the list, drag down shrinks. Bounds keep at least one row visible and cap at the viewport.
+    void ChangesResizeThumb_DragDelta(object sender, DragDeltaEventArgs e)
+    {
+        const double minH = 22;
+        double maxH = Math.Max(minH, ActualHeight - 200);
+        double next = ChangesScroll.MaxHeight - e.VerticalChange;
+        ChangesScroll.MaxHeight = Math.Max(minH, Math.Min(maxH, next));
+    }
+
+    static void AddCount(StackPanel content, int n, string sign, Brush brush, double opacity)
+    {
+        if (n <= 0) return;
+        content.Children.Add(new TextBlock
         {
-            var tag = new TextBlock
-            {
-                Text = "  accepted",
-                FontSize = 10,
-                Opacity = 0.55,
-                FontStyle = FontStyles.Italic,
-                VerticalAlignment = VerticalAlignment.Center,
-            };
-            tag.SetResourceReference(TextBlock.ForegroundProperty, EnvironmentColors.ToolWindowTextBrushKey);
-            content.Children.Add(tag);
-        }
+            Text = sign + n,
+            FontFamily = new FontFamily("Consolas"),
+            FontSize = 11,
+            Foreground = brush,
+            Opacity = opacity,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 4, 0),
+        });
     }
 
     FrameworkElement BuildDenialRow(DenialItem item)
@@ -1305,17 +1313,13 @@ public partial class ChatControl : UserControl
     {
         content.Children.Clear();
 
-        // Redo (↷) floats on the left, dimmed and disabled when the file
-        // has drifted since the deny (CanRedo == false).
+        // Redo (↷) hidden once the file's drifted since the deny (CanRedo == false).
         var redo = new Button
         {
-            Content = "↷",                 // ↷
-            ToolTip = item.CanRedo
-                ? "Re-apply this change"
-                : "File was modified since deny — can't redo",
+            Content = "↷",
+            ToolTip = "Re-apply this change",
             Style = (Style)FindResource("ChangeRowButtonStyle"),
-            IsEnabled = item.CanRedo,
-            Opacity = item.CanRedo ? 1.0 : 0.4,
+            Visibility = item.CanRedo ? Visibility.Visible : Visibility.Collapsed,
         };
         redo.Click += async (_, _) => await _vm.RedoDenialAsync(item);
         content.Children.Add(redo);

@@ -44,6 +44,10 @@ public sealed class ChangeTrackerTests : IDisposable
         try { Directory.Delete(_workspace, recursive: true); } catch { }
     }
 
+    // After fold-on-accept, rows persist with accepted history; "no open work" → every row has 0 open lines.
+    static void AssertNoOpenChanges(SessionChangesSnapshot snap) =>
+        Assert.All(snap.Proposals, p => Assert.True(p.LinesAdded == 0 && p.LinesRemoved == 0));
+
     // ---- Test helpers ------------------------------------------------
 
     string MakeFile(string name, string content)
@@ -119,7 +123,7 @@ public sealed class ChangeTrackerTests : IDisposable
         Assert.True(_tracker.Accept(SessionId, path));
 
         Assert.Equal("after", File.ReadAllText(path));     // disk untouched
-        Assert.Empty(_tracker.Snapshot(SessionId).Proposals);
+        AssertNoOpenChanges(_tracker.Snapshot(SessionId));
     }
 
     // ---- Deny-after-accept regression --------------------------------
@@ -140,7 +144,7 @@ public sealed class ChangeTrackerTests : IDisposable
 
         Assert.Equal("after", File.ReadAllText(path));
         var snap = _tracker.Snapshot(SessionId);
-        Assert.Empty(snap.Proposals);
+        AssertNoOpenChanges(snap);
         Assert.Empty(snap.Denials);
     }
 
@@ -181,8 +185,7 @@ public sealed class ChangeTrackerTests : IDisposable
         // First model edit ('a' → 'A') survives; second reverted.
         Assert.Equal("A\nb\nc\nd\ne\nf\n", File.ReadAllText(path));
         var snap = _tracker.Snapshot(SessionId);
-        // No proposal left — Baseline matches disk again.
-        Assert.Empty(snap.Proposals);
+        AssertNoOpenChanges(snap);
         // Denial stashes the pre-deny content so redo can bring it back.
         var d = Assert.Single(snap.Denials);
         Assert.Single(d.Entries);

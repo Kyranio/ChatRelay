@@ -99,15 +99,19 @@ public record RespondPermissionParams(string RequestId, string Decision, bool Re
 public record SessionChangesSnapshot(
     string SessionId,
     IReadOnlyList<ChangeProposal> Proposals,
-    IReadOnlyList<DenialGroup> Denials);
+    IReadOnlyList<DenialGroup> Denials,
+    int AcceptedLinesAdded = 0,                 // cumulative since the session was created
+    int AcceptedLinesRemoved = 0);
 
 public record ChangeProposal(
     string FilePath,
     string AbsolutePath,
-    int LinesAdded,
+    int LinesAdded,                          // open / pending diff (Baseline → LastApplied)
     int LinesRemoved,
     string State,                            // "open" | "accepted" — file-level rollup
-    IReadOnlyList<HunkInfo> Hunks);          // empty when nothing left to show
+    IReadOnlyList<HunkInfo> Hunks,           // empty when nothing left to show
+    int AcceptedLinesAdded = 0,              // cumulative accepted on this file (volatile, in-memory)
+    int AcceptedLinesRemoved = 0);
 
 /// <summary>
 /// One model-vs-baseline edit hunk in a tracked file. Coordinates are

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using ChatRelay.Changes;
+using ChatRelay.Host;
 
 namespace ChatRelay.IntegrationTests;
 
@@ -37,6 +38,10 @@ public sealed class HunkOperationsTests : IDisposable
         _tracker.WorkspaceRoot = null;
         try { Directory.Delete(_workspace, recursive: true); } catch { }
     }
+
+    // After fold-on-accept the row stays alive carrying accepted history, so "no work to do" means "every row has 0 open lines".
+    static void AssertNoOpenChanges(SessionChangesSnapshot snap) =>
+        Assert.All(snap.Proposals, p => Assert.True(p.LinesAdded == 0 && p.LinesRemoved == 0));
 
     // ---- LineDiff.ComputeHunks --------------------------------------
 
@@ -271,7 +276,7 @@ public sealed class HunkOperationsTests : IDisposable
         // Disk untouched, no denial recorded, no proposal remains.
         Assert.Equal("a\nB\nc\n", File.ReadAllText(path));
         var snap = _tracker.Snapshot(SessionId);
-        Assert.Empty(snap.Proposals);
+        AssertNoOpenChanges(snap);
         Assert.Empty(snap.Denials);
     }
 
@@ -290,7 +295,7 @@ public sealed class HunkOperationsTests : IDisposable
 
         // Disk has the accepted edits; no proposal remains.
         Assert.Equal("A\nb\nC\n", File.ReadAllText(path));
-        Assert.Empty(_tracker.Snapshot(SessionId).Proposals);
+        AssertNoOpenChanges(_tracker.Snapshot(SessionId));
     }
 
     [Fact]
@@ -305,7 +310,7 @@ public sealed class HunkOperationsTests : IDisposable
         EditCycle(path, "A\nb\nc\n");
         var firstHunk = _tracker.Snapshot(SessionId).Proposals[0].Hunks[0];
         Assert.True(_tracker.AcceptHunk(SessionId, path, firstHunk.BaselineStart, firstHunk.BaselineCount));
-        Assert.Empty(_tracker.Snapshot(SessionId).Proposals);
+        AssertNoOpenChanges(_tracker.Snapshot(SessionId));
 
         // Model edits the same line again with different content.
         EditCycle(path, "X\nb\nc\n");
@@ -330,7 +335,7 @@ public sealed class HunkOperationsTests : IDisposable
         // identical end state.
         EditCycle(path, "A\nb\nc\n");
 
-        Assert.Empty(_tracker.Snapshot(SessionId).Proposals);
+        AssertNoOpenChanges(_tracker.Snapshot(SessionId));
     }
 
     // ---- Phase 4.4a: live-buffer extension --------------------------
@@ -381,7 +386,7 @@ public sealed class HunkOperationsTests : IDisposable
         _tracker.OnExternalFileChange(path);
 
         // No proposal — Baseline absorbed "Bx", LastApplied matches.
-        Assert.Empty(_tracker.Snapshot(SessionId).Proposals);
+        AssertNoOpenChanges(_tracker.Snapshot(SessionId));
         Assert.Equal("a\nBx\nc\n", File.ReadAllText(path));
     }
 
@@ -421,7 +426,7 @@ public sealed class HunkOperationsTests : IDisposable
         WriteWithRetry(path, "X\na\nb\nc\nd\ne\nF\n");
         _tracker.OnExternalFileChange(path);
 
-        Assert.Empty(_tracker.Snapshot(SessionId).Proposals);
+        AssertNoOpenChanges(_tracker.Snapshot(SessionId));
         Assert.Equal("X\na\nb\nc\nd\ne\nF\n", File.ReadAllText(path));
     }
 
@@ -459,7 +464,7 @@ public sealed class HunkOperationsTests : IDisposable
         // (still has both the model's "B" and user's "X"), no proposal
         // remains because the new Baseline matches disk.
         Assert.Equal("a\nB\nX\nc\n", File.ReadAllText(path));
-        Assert.Empty(_tracker.Snapshot(SessionId).Proposals);
+        AssertNoOpenChanges(_tracker.Snapshot(SessionId));
     }
 
     [Fact]

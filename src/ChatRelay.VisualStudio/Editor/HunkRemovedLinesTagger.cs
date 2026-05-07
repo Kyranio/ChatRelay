@@ -59,6 +59,7 @@ internal sealed class HunkRemovedLinesTagger : ITagger<InterLineAdornmentTag>
         if (_filePath is null) return;
         _service.HunksChanged += OnHunksChanged;
         _formatMap.ClassificationFormatMappingChanged += OnFormatMappingChanged;
+        _view.LayoutChanged += OnLayoutChanged;
         _view.Closed += OnViewClosed;
     }
 
@@ -105,7 +106,7 @@ internal sealed class HunkRemovedLinesTagger : ITagger<InterLineAdornmentTag>
                     adornmentFactory: factory,
                     isAboveLine: isAboveLine,
                     initialHeight: height,
-                    horizontalPositioningMode: HorizontalPositioningMode.TextRelative,
+                    horizontalPositioningMode: HorizontalPositioningMode.ViewRelative,
                     horizontalOffset: 0,
                     removalCallback: null));
         }
@@ -145,6 +146,8 @@ internal sealed class HunkRemovedLinesTagger : ITagger<InterLineAdornmentTag>
             Background = RemovedFill,
             BorderThickness = new Thickness(0),
             Height = tagHeight,
+            // Span the full viewport so the red bar matches the blue highlight's width.
+            Width = _view.ViewportWidth,
         };
     }
 
@@ -155,6 +158,14 @@ internal sealed class HunkRemovedLinesTagger : ITagger<InterLineAdornmentTag>
     }
 
     void OnFormatMappingChanged(object? sender, EventArgs e) => FireTagsChangedForWholeSnapshot();
+
+    double _lastViewportWidth;
+    void OnLayoutChanged(object? sender, TextViewLayoutChangedEventArgs e)
+    {
+        if (Math.Abs(_view.ViewportWidth - _lastViewportWidth) < 0.5) return;
+        _lastViewportWidth = _view.ViewportWidth;
+        FireTagsChangedForWholeSnapshot();
+    }
 
     void FireTagsChangedForWholeSnapshot()
     {
@@ -168,6 +179,7 @@ internal sealed class HunkRemovedLinesTagger : ITagger<InterLineAdornmentTag>
     {
         _service.HunksChanged -= OnHunksChanged;
         _formatMap.ClassificationFormatMappingChanged -= OnFormatMappingChanged;
+        _view.LayoutChanged -= OnLayoutChanged;
         _view.Closed -= OnViewClosed;
     }
 

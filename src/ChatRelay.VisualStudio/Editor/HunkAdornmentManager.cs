@@ -26,6 +26,7 @@ sealed class HunkAdornmentManager
 
     const double ButtonSize = 24;
     const double ButtonGap = 6;
+    const double StickyTopMargin = 6;
 
     readonly IWpfTextView _view;
     readonly EditorChangesService _service;
@@ -219,18 +220,45 @@ sealed class HunkAdornmentManager
         _layer.AddAdornment(AdornmentPositioningBehavior.OwnerControlled, span, AdornmentTagFor(t.Info, "highlight"), rect, null);
     }
 
-    // Anchors at the top of the hunk's first VISIBLE line so buttons stay reachable as the user scrolls a tall hunk.
+    // CSS-sticky positioning: anchored at the hunk's visual top (red strip if any, else blue), clamped to viewport top
+    // with a margin as the hunk scrolls past, then released downward when the hunk's bottom approaches.
     void RenderButtons(TrackedHunk t, SnapshotSpan span)
     {
         if (_overlay is null) return;
         var formatted = _view.TextViewLines.GetTextViewLinesIntersectingSpan(span);
         if (formatted is null || formatted.Count == 0) return;
-        var firstView = formatted[0];
 
         var row = BuildButtonRow(t.Info);
         row.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+        double rowH = row.DesiredSize.Height;
+
+        var firstView = formatted[0];
+        bool hasStrip = t.Info.BaselineLines.Count > 0;
+        // .Top includes any reserved gap above the line (= top of the red strip when there is one).
+        double hunkTopY = hasStrip ? firstView.Top : firstView.TextTop;
+
+        double hunkBottomY;
+        if (t.Info.CurrentCount == 0)
+        {
+            // Pure deletion: the visible hunk is just the strip; it ends where the surviving line's text begins.
+            hunkBottomY = firstView.TextTop;
+        }
+        else
+        {
+            // For multi-line hunks the last visible line may be earlier than the hunk's actual last line; use it
+            // anyway as the bottom-bound only when we know we have it, otherwise treat bottom as off-screen below.
+            int lastHunkLine = t.Info.CurrentStart + t.Info.CurrentCount - 1;
+            var lastView = formatted[formatted.Count - 1];
+            int lastViewLine = span.Snapshot.GetLineNumberFromPosition(lastView.Start.Position);
+            hunkBottomY = lastViewLine >= lastHunkLine ? lastView.TextBottom : double.PositiveInfinity;
+        }
+
+        double stickyTop = _view.ViewportTop + StickyTopMargin;
+        double targetTop = hunkTopY >= stickyTop ? hunkTopY : Math.Min(stickyTop, hunkBottomY - rowH);
+        if (targetTop + rowH < _view.ViewportTop) return;
+
         Canvas.SetLeft(row, _view.ViewportLeft + _view.ViewportWidth - row.DesiredSize.Width - 8);
-        Canvas.SetTop(row, firstView.TextTop);
+        Canvas.SetTop(row, targetTop);
         _overlay.AddAdornment(AdornmentPositioningBehavior.OwnerControlled, span, AdornmentTagFor(t.Info, "buttons"), row, null);
     }
 

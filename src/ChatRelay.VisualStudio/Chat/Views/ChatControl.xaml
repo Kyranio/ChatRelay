@@ -434,15 +434,53 @@
                  row spacing in the chat layout is preserved when only one
                  of the two is visible. -->
             <StackPanel Grid.Row="3" Margin="4,0">
-                <StackPanel x:Name="ChangesContainer"
-                            Visibility="Collapsed">
+                <!-- Counter strip is always visible once the session has any history,
+                     even after every proposal has been accepted (then it shows the
+                     cumulative accepted totals only). -->
+                <StackPanel x:Name="ChangesHeader"
+                            Orientation="Horizontal"
+                            Visibility="Collapsed"
+                            Margin="2,0,0,2">
                     <TextBlock Text="Changes"
                                FontSize="11"
                                FontWeight="SemiBold"
                                Opacity="0.55"
-                               Margin="2,0,0,2"
+                               VerticalAlignment="Center"
                                Foreground="{DynamicResource {x:Static vs:EnvironmentColors.ToolWindowTextBrushKey}}"/>
-                    <StackPanel x:Name="ChangesList"/>
+                    <TextBlock x:Name="ChangesHeaderCounters"
+                               FontSize="10"
+                               FontFamily="Consolas"
+                               Margin="8,0,0,0"
+                               VerticalAlignment="Center"
+                               Foreground="{DynamicResource {x:Static vs:EnvironmentColors.ToolWindowTextBrushKey}}"
+                               Opacity="0.7"/>
+                </StackPanel>
+                <StackPanel x:Name="ChangesContainer"
+                            Visibility="Collapsed">
+                    <!-- Drag up/down to grow / shrink the changelist beyond its 5-row default. -->
+                    <Thumb x:Name="ChangesResizeThumb"
+                           Height="6"
+                           Cursor="SizeNS"
+                           HorizontalAlignment="Stretch"
+                           Background="Transparent"
+                           DragDelta="ChangesResizeThumb_DragDelta">
+                        <Thumb.Template>
+                            <ControlTemplate TargetType="Thumb">
+                                <Border Background="Transparent" Padding="0,2">
+                                    <Rectangle Height="2" Width="36"
+                                               Fill="{DynamicResource {x:Static vs:EnvironmentColors.ToolWindowTextBrushKey}}"
+                                               Opacity="0.25"
+                                               RadiusX="1" RadiusY="1"/>
+                                </Border>
+                            </ControlTemplate>
+                        </Thumb.Template>
+                    </Thumb>
+                    <ScrollViewer x:Name="ChangesScroll"
+                                  VerticalScrollBarVisibility="Auto"
+                                  HorizontalScrollBarVisibility="Disabled"
+                                  MaxHeight="130">
+                        <StackPanel x:Name="ChangesList"/>
+                    </ScrollViewer>
                 </StackPanel>
                 <Expander x:Name="DenialsExpander"
                           Header="Denied / undone changes"

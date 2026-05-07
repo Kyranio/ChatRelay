@@ -104,6 +104,11 @@ public sealed class ChangeTracker
         {
             if (!s.Files.TryGetValue(NormalisePath(filePath), out var f)) return false;
             if (!f.HasProposal) return false;
+            var counts = LineDiff.Compute(f.Baseline, f.LastApplied);
+            f.AcceptedLinesAdded += counts.Added;
+            f.AcceptedLinesRemoved += counts.Removed;
+            s.AcceptedLinesAdded += counts.Added;
+            s.AcceptedLinesRemoved += counts.Removed;
             f.Baseline = f.LastApplied;
             changed = true;
         }
@@ -121,6 +126,12 @@ public sealed class ChangeTracker
             if (!s.Files.TryGetValue(NormalisePath(filePath), out var f)) return false;
             var hunk = FindHunkByCoords(LineDiff.ComputeHunks(f.Baseline, f.LastApplied), baselineStart, baselineCount);
             if (hunk is null) return false;
+            // Re-diff just this hunk's lines so noise context coalesced into it doesn't inflate the cumulative counts.
+            var counts = LineDiff.Compute(string.Join("\n", hunk.Value.OldLines), string.Join("\n", hunk.Value.NewLines));
+            f.AcceptedLinesAdded += counts.Added;
+            f.AcceptedLinesRemoved += counts.Removed;
+            s.AcceptedLinesAdded += counts.Added;
+            s.AcceptedLinesRemoved += counts.Removed;
             f.Baseline = LineDiff.SpliceLines(f.Baseline, baselineStart, baselineCount, hunk.Value.NewLines);
             changed = true;
         }
@@ -257,6 +268,11 @@ public sealed class ChangeTracker
             foreach (var f in s.Files.Values)
             {
                 if (!f.HasProposal) continue;
+                var counts = LineDiff.Compute(f.Baseline, f.LastApplied);
+                f.AcceptedLinesAdded += counts.Added;
+                f.AcceptedLinesRemoved += counts.Removed;
+                s.AcceptedLinesAdded += counts.Added;
+                s.AcceptedLinesRemoved += counts.Removed;
                 f.Baseline = f.LastApplied;
                 any = true;
             }
@@ -476,7 +492,7 @@ public sealed class ChangeTracker
                     + (extendedProposal ? " (extended proposal)" : ""));
 
                 bool entryDropped = false;
-                if (!extendedProposal && !f.HasProposal && f.Denied.Count == 0)
+                if (!extendedProposal && !f.HasProposal && f.Denied.Count == 0 && !f.HasAcceptedHistory)
                 {
                     session.Files.Remove(key);
                     entryDropped = true;
@@ -530,10 +546,11 @@ public sealed class ChangeTracker
 
         foreach (var f in s.Files.Values.OrderBy(x => x.DisplayPath, StringComparer.OrdinalIgnoreCase))
         {
-            if (f.HasProposal)
+            // Emit a row whenever there's open work OR a non-zero accepted history to display.
+            if (f.HasProposal || f.HasAcceptedHistory)
             {
-                var counts = LineDiff.Compute(f.Baseline, f.LastApplied);
-                var hunks = LineDiff.ComputeHunks(f.Baseline, f.LastApplied);
+                var counts = f.HasProposal ? LineDiff.Compute(f.Baseline, f.LastApplied) : default;
+                var hunks = f.HasProposal ? LineDiff.ComputeHunks(f.Baseline, f.LastApplied) : (IReadOnlyList<LineDiff.Hunk>)Array.Empty<LineDiff.Hunk>();
                 var hunkInfos = new List<HunkInfo>(hunks.Count);
                 foreach (var h in hunks)
                 {
@@ -553,7 +570,9 @@ public sealed class ChangeTracker
                     LinesAdded: counts.Added,
                     LinesRemoved: counts.Removed,
                     State: "open",
-                    Hunks: hunkInfos));
+                    Hunks: hunkInfos,
+                    AcceptedLinesAdded: f.AcceptedLinesAdded,
+                    AcceptedLinesRemoved: f.AcceptedLinesRemoved));
             }
 
             if (f.Denied.Count > 0)
@@ -572,7 +591,7 @@ public sealed class ChangeTracker
             }
         }
 
-        return new SessionChangesSnapshot(sessionId, proposals, denials);
+        return new SessionChangesSnapshot(sessionId, proposals, denials, s.AcceptedLinesAdded, s.AcceptedLinesRemoved);
     }
 
     void FireNotify(string sessionId)
@@ -594,5 +613,7 @@ public sealed class ChangeTracker
         public readonly object Sync = new();
         public readonly Dictionary<string, FileTracker> Files = new(StringComparer.OrdinalIgnoreCase);
         public string? CurrentModel;
+        public int AcceptedLinesAdded;
+        public int AcceptedLinesRemoved;
     }
 }

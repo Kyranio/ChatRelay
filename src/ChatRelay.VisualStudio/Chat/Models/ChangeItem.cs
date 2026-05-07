@@ -4,12 +4,7 @@ using ChatRelay.Host;
 
 namespace ChatRelay.Chat.Models
 {
-    /// <summary>
-    /// One row in the chat-side changes list (open or accepted state).
-    /// Mirrors <see cref="ChangeProposal"/> with INPC so the rendered chip
-    /// updates live when a follow-on edit re-fires onChangesUpdated for the
-    /// same file (line counts shift, state may flip from open → accepted).
-    /// </summary>
+    /// <summary>One row in the chat-side changes list. INPC so the rendered chip updates live as line counts shift.</summary>
     public sealed class ChangeItem : INotifyPropertyChanged
     {
         public string FilePath { get; set; } = string.Empty;
@@ -29,17 +24,21 @@ namespace ChatRelay.Chat.Models
             set { if (_linesRemoved != value) { _linesRemoved = value; Raise(nameof(LinesRemoved)); } }
         }
 
-        // "open" or "accepted". Stored as the wire string (not an enum) so
-        // ChangeTracker is the single source of truth for what counts as
-        // each state — the shell never invents new ones.
-        string _state = "open";
-        public string State
+        int _acceptedLinesAdded;
+        public int AcceptedLinesAdded
         {
-            get => _state;
-            set { if (_state != value) { _state = value; Raise(nameof(State)); Raise(nameof(IsAccepted)); } }
+            get => _acceptedLinesAdded;
+            set { if (_acceptedLinesAdded != value) { _acceptedLinesAdded = value; Raise(nameof(AcceptedLinesAdded)); } }
         }
 
-        public bool IsAccepted => string.Equals(_state, "accepted", System.StringComparison.OrdinalIgnoreCase);
+        int _acceptedLinesRemoved;
+        public int AcceptedLinesRemoved
+        {
+            get => _acceptedLinesRemoved;
+            set { if (_acceptedLinesRemoved != value) { _acceptedLinesRemoved = value; Raise(nameof(AcceptedLinesRemoved)); } }
+        }
+
+        public bool HasOpenChanges => _linesAdded > 0 || _linesRemoved > 0;
 
         public event PropertyChangedEventHandler? PropertyChanged;
         void Raise(string name) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));

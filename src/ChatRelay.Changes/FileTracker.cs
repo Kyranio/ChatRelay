@@ -15,7 +15,12 @@ public sealed class FileTracker
     /// <summary>Past denials in deny-order, each redoable while its post-deny disk state hasn't drifted.</summary>
     public List<DeniedChangeRecord> Denied { get; } = new();
 
+    /// <summary>Cumulative line counts the user has accepted on this file since the session started.</summary>
+    public int AcceptedLinesAdded { get; set; }
+    public int AcceptedLinesRemoved { get; set; }
+
     public bool HasProposal => !string.Equals(Baseline, LastApplied, StringComparison.Ordinal);
+    public bool HasAcceptedHistory => AcceptedLinesAdded > 0 || AcceptedLinesRemoved > 0;
 
     /// <summary>True between tool_use and tool_result so the watcher doesn't mis-classify the model's own write as external.</summary>
     public bool ExpectingWrite { get; set; }
