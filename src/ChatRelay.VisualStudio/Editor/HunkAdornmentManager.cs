@@ -8,6 +8,7 @@ using System.Windows.Shapes;
 using ChatRelay.Host;
 using Microsoft.VisualStudio.PlatformUI;
 using Microsoft.VisualStudio.Text;
+using Microsoft.VisualStudio.Text.Adornments;
 using Microsoft.VisualStudio.Text.Editor;
 using Microsoft.VisualStudio.Text.Formatting;
 
@@ -50,6 +51,12 @@ sealed class HunkAdornmentManager
     // the row doesn't paint over them.
     readonly IAdornmentLayer? _layer;
     readonly IAdornmentLayer? _overlay;
+    // Button rows live in a popup space-reservation agent, not the
+    // adornment layer, so they survive scrolling past the hunk's edges
+    // (manual Canvas placement clipped at the viewport bottom for hunks
+    // taller than the visible area).
+    readonly ISpaceReservationManager? _buttonManager;
+    readonly List<ISpaceReservationAgent> _buttonAgents = new();
 
     // Tracked hunks carry an ITrackingSpan so the highlight/buttons
     // follow buffer edits live without waiting for a host snapshot.
@@ -79,6 +86,15 @@ sealed class HunkAdornmentManager
             Debug.WriteLine($"[ChatRelay.editor] Failed to acquire adornment layer: {ex.Message}");
             _layer = null;
             _overlay = null;
+        }
+
+        try
+        {
+            _buttonManager = view.GetSpaceReservationManager(HunkButtonsSpaceReservationManagerDefinition.Name);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[ChatRelay.editor] Failed to acquire button popup manager: {ex.Message}");
         }
 
         // Subscribe unconditionally — _filePath might still be null at
@@ -293,13 +309,12 @@ sealed class HunkAdornmentManager
         if (_layer is null) return;
         _layer.RemoveAllAdornments();
         _overlay?.RemoveAllAdornments();
+        ClearButtonAgents();
 
         var snapshot = _view.TextSnapshot;
         foreach (var t in _tracked)
         {
-            // Skip accepted hunks the user has typed into. The marker is
-            // suppressed locally until the next snapshot (which the host
-            // RPC will re-classify as open).
+            // Skip accepted hunks the user has typed into.
             if (t.LocallyInvalidated) continue;
 
             try
@@ -308,13 +323,24 @@ sealed class HunkAdornmentManager
                 if (string.Equals(t.Info.State, "accepted", StringComparison.Ordinal))
                     RenderAcceptedHunk(t.Info, live, snapshot);
                 else
-                    RenderOpenHunk(t.Info, live, snapshot);
+                    RenderOpenHunk(t, live, snapshot);
             }
             catch (Exception ex)
             {
                 Debug.WriteLine($"[ChatRelay.editor] Render hunk failed: {ex.Message}");
             }
         }
+    }
+
+    void ClearButtonAgents()
+    {
+        if (_buttonManager is null || _buttonAgents.Count == 0) return;
+        foreach (var agent in _buttonAgents)
+        {
+            try { _buttonManager.RemoveAgent(agent); }
+            catch (Exception ex) { Debug.WriteLine($"[ChatRelay.editor] RemoveAgent failed: {ex.Message}"); }
+        }
+        _buttonAgents.Clear();
     }
 
     // Accepted hunks render only as a thin turquoise marker bar in the
@@ -355,28 +381,29 @@ sealed class HunkAdornmentManager
             span, AdornmentTagFor(h, "accepted-bar"), bar, null);
     }
 
-    void RenderOpenHunk(HunkInfo h, SnapshotSpan span, ITextSnapshot snapshot)
+    void RenderOpenHunk(TrackedHunk t, SnapshotSpan span, ITextSnapshot snapshot)
     {
         if (_layer is null) return;
-
-        // Y to position the buttons row beneath whatever's visible.
-        double belowY;
+        var h = t.Info;
 
         if (span.Length > 0)
         {
-            // Intersect-the-span keeps decorations visible when the hunk
-            // is partially scrolled off-screen — anchor to whichever
-            // lines ARE in the formatted view.
+            // Intersect-the-span keeps the highlight visible when the
+            // hunk is partially scrolled off-screen.
             var formatted = _view.TextViewLines.GetTextViewLinesIntersectingSpan(span);
-            if (formatted is null || formatted.Count == 0) return;
+            if (formatted is null || formatted.Count == 0)
+            {
+                // Hunk fully off-screen — still create the popup so the
+                // buttons stay reachable when scrolled close enough.
+                AddButtonPopup(h, t.Span);
+                return;
+            }
             var firstView = formatted[0];
             var lastView = formatted[formatted.Count - 1];
 
-            // TextTop / TextBottom (the glyph band) rather than Top /
-            // Bottom — Top includes any reserved top-space VS allocated
-            // above the line for HunkRemovedLinesTagger's
-            // InterLineAdornmentTag. Stretching the highlight from Top
-            // would z-fight the red strip and hide the blue.
+            // TextTop / TextBottom — Top includes any reserved top-space
+            // VS allocated above the line for HunkRemovedLinesTagger's
+            // InterLineAdornmentTag, which would z-fight the red strip.
             var rect = new Rectangle
             {
                 Fill = HighlightFill,
@@ -389,40 +416,39 @@ sealed class HunkAdornmentManager
             _layer.AddAdornment(
                 AdornmentPositioningBehavior.OwnerControlled,
                 span, AdornmentTagFor(h, "highlight"), rect, null);
-            belowY = lastView.TextBottom;
-        }
-        else
-        {
-            // Pure deletion — anchor below the join-point line.
-            int lineNum = snapshot.GetLineNumberFromPosition(span.Start.Position);
-            if (lineNum >= snapshot.LineCount) return;
-            var line = snapshot.GetLineFromLineNumber(lineNum);
-            var formatted = _view.TextViewLines.GetTextViewLinesIntersectingSpan(
-                new SnapshotSpan(line.Start, line.LengthIncludingLineBreak));
-            if (formatted is null || formatted.Count == 0) return;
-            belowY = formatted[0].TextBottom;
         }
 
-        var buttons = BuildButtonRow(h);
-        if (buttons is FrameworkElement fe)
-            fe.VerticalAlignment = VerticalAlignment.Top;
-
-        Canvas.SetLeft(buttons, _view.ViewportLeft + 4);
-        Canvas.SetTop(buttons, belowY + 2);
-        (_overlay ?? _layer).AddAdornment(
-            AdornmentPositioningBehavior.OwnerControlled,
-            new SnapshotSpan(span.Start, 0),
-            AdornmentTagFor(h, "buttons"), buttons, null);
+        AddButtonPopup(h, t.Span);
     }
 
-    // Square 24×24 buttons sized to match the Expander header chrome
-    // (FontSize 11 + Padding (6,2,6,2) + ~border ≈ 24px tall) so the
-    // accept/reject row lines up perfectly with the "{N} removed lines"
-    // header. 6px gap between the two buttons.
+    void AddButtonPopup(HunkInfo h, ITrackingSpan trackingSpan)
+    {
+        if (_buttonManager is null) return;
+        var buttons = BuildButtonRow(h);
+        try
+        {
+            // PreferLeftOrTopPosition + RightOrBottomJustify pins the popup
+            // to the BOTTOM-RIGHT corner of the hunk's tracked span — the
+            // same place the inline button row used to live, but rendered
+            // as a Win32 popup so it stays reachable when the span runs
+            // taller than the viewport.
+            var agent = _buttonManager.CreatePopupAgent(
+                trackingSpan,
+                PopupStyles.RightOrBottomJustify,
+                buttons);
+            _buttonManager.AddAgent(agent);
+            _buttonAgents.Add(agent);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[ChatRelay.editor] CreatePopupAgent failed: {ex.Message}");
+        }
+    }
+
+    // Square 24×24 buttons; 6px gap between accept and reject.
     const double SmallButtonWidth = 24;
     const double SmallButtonHeight = 24;
     const double SmallButtonGap = 6;
-    const double OpenButtonRowWidth = SmallButtonWidth * 2 + SmallButtonGap;
 
     UIElement BuildButtonRow(HunkInfo h)
     {
@@ -574,6 +600,7 @@ sealed class HunkAdornmentManager
 
     void OnViewClosed(object? sender, EventArgs e)
     {
+        ClearButtonAgents();
         _service.HunksChanged -= OnHunksChanged;
         _view.Closed -= OnViewClosed;
         _view.LayoutChanged -= OnLayoutChanged;
