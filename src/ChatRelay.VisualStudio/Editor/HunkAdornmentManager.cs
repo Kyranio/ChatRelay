@@ -40,38 +40,25 @@ sealed class HunkAdornmentManager
     // Translucent overlay for the new-line highlight; alpha picked to be
     // visible without obscuring text or syntax-highlight colors.
     static readonly Brush HighlightFill = Frozen(new SolidColorBrush(Color.FromArgb(0x35, 0x40, 0xE0, 0xD0)));
-    // Red tint for the inline "removed lines" block painted ABOVE the
-    // model's new lines via the LineTransform-reserved top-space.
-    // Slightly stronger alpha than HighlightFill so the deletion block
-    // reads as distinct from the addition highlight.
-    static readonly Brush RemovedBlockFill = Frozen(new SolidColorBrush(Color.FromArgb(0x40, 0xE0, 0x40, 0x40)));
-    static readonly Brush RemovedBlockText = Frozen(new SolidColorBrush(Color.FromRgb(0xCB, 0x6E, 0x6E)));
-
-    // Padding above + below the inline removed-lines block, in pixels.
-    // Reserved top-space = lines × lineHeight + 2 × this constant.
-    const double RemovedBlockPadding = 3;
 
     readonly IWpfTextView _view;
     readonly string? _filePath;
     readonly EditorChangesService _service;
     // Background layer (below Text): turquoise highlight + accepted marker
-    // bar. Overlay layer (above Text): ghost expander + accept/reject buttons.
-    // Splitting the two means the editor's source code text stays the topmost
-    // *visible* content for the highlight, while the interactive controls
-    // anchored below the hunk's lines aren't obscured by the editor's own
-    // text painted in those rows.
+    // bar. Overlay layer (above Text): accept/reject buttons. Splitting
+    // the two means the editor's source code text stays the topmost
+    // *visible* content for the highlight, while the interactive
+    // controls anchored below the hunk's lines aren't obscured by the
+    // editor's own text painted in those rows.
+    //
+    // The "removed lines" inline red block is NOT rendered here — it's
+    // produced by HunkRemovedLinesTagger via VS's InterLineAdornmentTag
+    // primitive, which handles space reservation and adornment
+    // positioning automatically. That removed the manual
+    // LineTransform/Canvas dance that used to race against the format
+    // pass and produce overlapping blocks until the user typed.
     readonly IAdornmentLayer? _layer;
     readonly IAdornmentLayer? _overlay;
-    // Per-view line-transform source — the same instance the MEF
-    // provider hands VS. We push reservation maps to it whenever the
-    // hunk set changes; VS calls back into it on every format pass to
-    // determine each line's top-space. Resolved through the property
-    // bag so we don't have to thread a reference from MEF.
-    readonly HunkLineTransformSource? _lineTransform;
-    // Re-entry guard for the SetTopSpaces → DisplayTextLineContainingBufferPosition →
-    // LayoutChanged → render loop. Without this, an in-render transform
-    // update could nest a layout pass.
-    bool _inLayoutUpdate;
 
     // Last hunk list we received from the service, paired with an
     // ITrackingSpan over each hunk's current line range. The tracking
@@ -111,14 +98,6 @@ sealed class HunkAdornmentManager
             _overlay = null;
         }
 
-        // Resolve (or create) the per-view line-transform source. Eager
-        // creation here means we don't have to wait for MEF to call the
-        // provider — the provider just hands back the same instance via
-        // GetOrCreateSingletonProperty.
-        _lineTransform = view.Properties.GetOrCreateSingletonProperty(
-            typeof(HunkLineTransformSource),
-            () => new HunkLineTransformSource(view));
-
         if (_filePath is null) return;
 
         _service.HunksChanged += OnHunksChanged;
@@ -129,12 +108,7 @@ sealed class HunkAdornmentManager
         // Pick up any hunks already known (the snapshot may have arrived
         // before the editor view opened).
         RebuildTrackedFromService();
-        if (_tracked.Count > 0)
-        {
-            bool transformsChanged = UpdateLineTransforms();
-            RenderHunks();
-            if (transformsChanged) QueueDeferredRender();
-        }
+        if (_tracked.Count > 0) RenderHunks();
     }
 
     void OnHunksChanged(string changedPath)
@@ -143,15 +117,7 @@ sealed class HunkAdornmentManager
         if (!string.Equals(changedPath, _filePath, StringComparison.OrdinalIgnoreCase)) return;
         RebuildTrackedFromService();
         Debug.WriteLine($"[ChatRelay.editor] Hunks for {_filePath}: {_tracked.Count} hunk(s)");
-        bool transformsChanged = UpdateLineTransforms();
-        // Always render once now (first paint, possibly with stale
-        // line positions on multi-hunk files). If we just kicked off a
-        // format pass, queue a follow-up render at Background priority
-        // so it runs once VS has finished re-laying out — that's when
-        // ITextViewLine.Top reflects the reserved gaps and the blocks
-        // land in their own slots instead of piling up.
         RenderHunks();
-        if (transformsChanged) QueueDeferredRender();
     }
 
     void OnLayoutChanged(object? sender, TextViewLayoutChangedEventArgs e)
@@ -218,97 +184,6 @@ sealed class HunkAdornmentManager
             // visually. The host's view will catch up on next save.
             if (IsHunkObsolete(t, current))
                 t.LocallyInvalidated = true;
-        }
-
-        // Anchor line numbers may have shifted — refresh the line-transform
-        // map so the inline removed-lines blocks ride along with the user's
-        // edits. DictionariesEqual inside SetTopSpaces avoids spurious
-        // re-formats when nothing actually moved. If the map DID change,
-        // queue a deferred render so positions are recomputed after the
-        // format pass settles.
-        if (UpdateLineTransforms()) QueueDeferredRender();
-    }
-
-    /// <summary>
-    /// Builds a {anchorLine → topSpace} map from the current tracked
-    /// open hunks and pushes it into <see cref="_lineTransform"/>. The
-    /// reserved space is where <see cref="RenderRemovedLinesBlock"/>
-    /// paints the inline red block on the next layout pass.
-    ///
-    /// <para>
-    /// Returns true iff the reservations actually changed — caller uses
-    /// that to decide whether to defer the next render until VS has run
-    /// the format pass triggered by <see cref="HunkLineTransformSource.SetTopSpaces"/>.
-    /// Without the deferral, immediate renders use the pre-format
-    /// <c>ITextViewLine.Top</c> values and adornments stack on top of
-    /// each other for files with multiple open hunks.
-    /// </para>
-    /// </summary>
-    bool UpdateLineTransforms()
-    {
-        if (_lineTransform is null) return false;
-        if (_inLayoutUpdate) return false;
-
-        var snapshot = _view.TextSnapshot;
-        var lineHeight = _view.LineHeight > 0 ? _view.LineHeight : 16;
-
-        var map = new Dictionary<int, double>();
-        foreach (var t in _tracked)
-        {
-            if (t.LocallyInvalidated) continue;
-            if (string.Equals(t.Info.State, "accepted", StringComparison.Ordinal)) continue;
-            if (t.Info.BaselineLines.Count == 0) continue;
-
-            int anchorLine;
-            try
-            {
-                var live = t.Span.GetSpan(snapshot);
-                anchorLine = snapshot.GetLineNumberFromPosition(live.Start);
-            }
-            catch { continue; }
-
-            double topSpace = t.Info.BaselineLines.Count * lineHeight + RemovedBlockPadding * 2;
-            // Multiple hunks anchored at the same line is unusual but
-            // possible (adjacent insert + delete). Stack their reservations.
-            map[anchorLine] = map.TryGetValue(anchorLine, out var existing)
-                ? existing + topSpace
-                : topSpace;
-        }
-
-        _inLayoutUpdate = true;
-        try { return _lineTransform.SetTopSpaces(map); }
-        finally { _inLayoutUpdate = false; }
-    }
-
-    /// <summary>
-    /// Queues a render at <see cref="DispatcherPriority.Background"/> so
-    /// it runs AFTER the format pass triggered by a top-space change has
-    /// completed and <c>ITextViewLine.Top</c> values reflect the new
-    /// reserved gaps. Without this, an immediate render-after-update
-    /// reads stale <c>Top</c> values and adornments on different lines
-    /// pile up on each other (the bug that the user-visible "hunks
-    /// overlap until you type" behaviour was reporting).
-    /// </summary>
-    void QueueDeferredRender()
-    {
-        try
-        {
-            _view.VisualElement.Dispatcher.BeginInvoke(
-                new Action(SafeRender),
-                System.Windows.Threading.DispatcherPriority.Background);
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"[ChatRelay.editor] Deferred render dispatch failed: {ex.Message}");
-        }
-    }
-
-    void SafeRender()
-    {
-        try { RenderHunks(); }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"[ChatRelay.editor] Render failed: {ex.Message}");
         }
     }
 
@@ -526,15 +401,11 @@ sealed class HunkAdornmentManager
 
         var anchorSpan = new SnapshotSpan(span.Start, 0);
 
-        // Inline removed-lines block painted in the top-space the
-        // line-transform source has reserved above the hunk's first
-        // line. Replaces the floating ghost expander — the deletion now
-        // reads as a contiguous git-style red strip.
-        if (h.BaselineLines.Count > 0)
-            RenderRemovedLinesBlock(h, span, snapshot);
+        // Inline removed-lines block is rendered by HunkRemovedLinesTagger
+        // via VS's InterLineAdornmentTag — VS reserves the gap and
+        // positions the adornment automatically. Nothing to paint here.
 
-        // Buttons stay below the highlight, anchored at viewport's left.
-        // No expander to align with anymore — they sit alone.
+        // Buttons below the highlight, anchored at viewport's left.
         var buttons = BuildButtonRow(h);
         if (buttons is FrameworkElement fe)
             fe.VerticalAlignment = VerticalAlignment.Top;
@@ -546,74 +417,6 @@ sealed class HunkAdornmentManager
         (_overlay ?? _layer).AddAdornment(
             AdornmentPositioningBehavior.OwnerControlled,
             anchorSpan, AdornmentTagFor(h, "buttons"), buttons, null);
-    }
-
-    /// <summary>
-    /// Paints the inline "removed lines" block in the vertical space
-    /// reserved by <see cref="HunkLineTransformSource"/> above the
-    /// hunk's first new line (or above the join-point line for pure
-    /// deletions). The block is a translucent red rectangle containing
-    /// a read-only TextBox of the old lines — selectable so the user
-    /// can copy bits back if they want to splice them in by hand.
-    /// </summary>
-    void RenderRemovedLinesBlock(HunkInfo h, SnapshotSpan span, ITextSnapshot snapshot)
-    {
-        if (_overlay is null && _layer is null) return;
-        if (h.BaselineLines.Count == 0) return;
-
-        var anchorView = _view.TextViewLines.GetTextViewLineContainingBufferPosition(span.Start);
-        if (anchorView is null) return;
-
-        var lineHeight = _view.LineHeight > 0 ? _view.LineHeight : 16;
-        var blockHeight = h.BaselineLines.Count * lineHeight;
-        // ITextViewLine.Top is the top of the line including any reserved
-        // top-space; TextTop is the top of the actual glyphs. The
-        // [Top, TextTop] band is the gap our LineTransform reserved.
-        // Place the block at Top + padding so there's a small gap above
-        // and below (the second padding sits between blockBottom and
-        // TextTop, matching the 2× padding budgeted in UpdateLineTransforms).
-        var blockTop = anchorView.Top + RemovedBlockPadding;
-
-        var text = new TextBox
-        {
-            Text = string.Join(Environment.NewLine, h.BaselineLines),
-            IsReadOnly = true,
-            IsReadOnlyCaretVisible = false,
-            BorderThickness = new Thickness(0),
-            Background = Brushes.Transparent,
-            Padding = new Thickness(8, 0, 4, 0),
-            FontFamily = new FontFamily("Consolas, Lucida Sans Typewriter, Courier New"),
-            FontSize = 12,
-            Opacity = 0.95,
-            IsTabStop = false,
-            AcceptsReturn = true,
-            HorizontalScrollBarVisibility = ScrollBarVisibility.Hidden,
-            VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
-            TextWrapping = TextWrapping.NoWrap,
-            Foreground = RemovedBlockText,
-        };
-
-        var container = new Border
-        {
-            Child = text,
-            Background = RemovedBlockFill,
-            BorderThickness = new Thickness(0),
-            Width = _view.ViewportWidth,
-            Height = blockHeight,
-        };
-
-        Canvas.SetLeft(container, _view.ViewportLeft);
-        Canvas.SetTop(container, blockTop);
-        // Overlay layer (above Text) — even though this paints in
-        // reserved space (no source code there), keeping it on the
-        // overlay matches the buttons' z-order and lets the user
-        // interact with the TextBox for selection.
-        var target = _overlay ?? _layer;
-        if (target is null) return;
-        target.AddAdornment(
-            AdornmentPositioningBehavior.OwnerControlled,
-            new SnapshotSpan(span.Start, 0),
-            AdornmentTagFor(h, "removed-block"), container, null);
     }
 
     // Square 24×24 buttons sized to match the Expander header chrome
