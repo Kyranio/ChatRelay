@@ -39,7 +39,11 @@ sealed class HunkAdornmentManager
     static readonly Brush HighlightFill = Frozen(new SolidColorBrush(Color.FromArgb(0x35, 0x40, 0xE0, 0xD0)));
 
     readonly IWpfTextView _view;
-    readonly string? _filePath;
+    // Lazy-resolved: ITextDocument (and therefore the buffer's FilePath)
+    // sometimes attaches AFTER our IWpfTextViewCreationListener fires, so a
+    // construction-time resolve would miss it permanently. We retry from
+    // each event handler until it sticks. Mutable for that reason.
+    string? _filePath;
     readonly EditorChangesService _service;
     // Background layer (below Text): highlight + accepted marker.
     // Overlay layer (above Text): buttons — kept above so editor text in
@@ -64,7 +68,6 @@ sealed class HunkAdornmentManager
     public HunkAdornmentManager(IWpfTextView view)
     {
         _view = view;
-        _filePath = ResolveFilePath(view);
         _service = EditorChangesService.Current;
         try
         {
@@ -78,23 +81,42 @@ sealed class HunkAdornmentManager
             _overlay = null;
         }
 
-        if (_filePath is null) return;
-
+        // Subscribe unconditionally — _filePath might still be null at
+        // this point (ITextDocument hasn't attached yet) and we need the
+        // event handlers to retry resolution when something later happens
+        // on the view.
         _service.HunksChanged += OnHunksChanged;
         _view.Closed += OnViewClosed;
         _view.LayoutChanged += OnLayoutChanged;
         _view.TextBuffer.Changed += OnBufferChanged;
 
-        // Pick up any hunks already known (the snapshot may have arrived
-        // before the editor view opened).
+        // Best-effort initial resolve. If it works, EnsureFilePath also
+        // fires the initial render. If not, the next event handler will
+        // retry resolution.
+        EnsureFilePath();
+    }
+
+    /// <summary>
+    /// Resolves the buffer's file path lazily. Returns true once we have a
+    /// path; false until ITextDocument attaches. Every event handler calls
+    /// this first so the renderer comes online as soon as the document
+    /// is available — even if that's well after IWpfTextViewCreationListener
+    /// fired. The first time it resolves we also prime the renderer so any
+    /// hunks already cached in EditorChangesService surface immediately.
+    /// </summary>
+    bool EnsureFilePath()
+    {
+        if (_filePath is not null) return true;
+        _filePath = ResolveFilePath(_view);
+        if (_filePath is null) return false;
         RebuildTrackedFromService();
         if (_tracked.Count > 0) RenderHunks();
+        return true;
     }
 
     void OnHunksChanged(string changedPath)
     {
-        // Subscribed only when _filePath is non-null (see ctor); safe to
-        // assume non-null here.
+        if (!EnsureFilePath()) return;
         if (!string.Equals(changedPath, _filePath, StringComparison.OrdinalIgnoreCase)) return;
         RebuildTrackedFromService();
         Debug.WriteLine($"[ChatRelay.editor] Hunks for {_filePath}: {_tracked.Count} hunk(s)");
@@ -103,8 +125,9 @@ sealed class HunkAdornmentManager
 
     void OnLayoutChanged(object? sender, TextViewLayoutChangedEventArgs e)
     {
-        // Tracking spans auto-translate across buffer edits; just
-        // re-render at the current span coords.
+        // Layout fires on every reformat / scroll / edit — a good moment to
+        // retry file-path resolution if it failed earlier.
+        if (!EnsureFilePath()) return;
         if (_tracked.Count == 0) return;
         RenderHunks();
     }
@@ -121,6 +144,7 @@ sealed class HunkAdornmentManager
     // special handling — tracking spans follow automatically.
     void OnBufferChanged(object? sender, TextContentChangedEventArgs e)
     {
+        if (!EnsureFilePath()) return;
         if (_tracked.Count == 0) return;
 
         var snapshot = e.After;
