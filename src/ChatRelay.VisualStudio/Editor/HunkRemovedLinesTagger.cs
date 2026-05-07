@@ -14,12 +14,7 @@ using Microsoft.VisualStudio.Utilities;
 
 namespace ChatRelay.Editor;
 
-/// <summary>
-/// Renders the "removed lines" inline block via VS's
-/// <see cref="InterLineAdornmentTag"/> primitive — VS reserves the gap
-/// AND positions the adornment for us, so we don't have to manage
-/// LineTransform reservations or Canvas Y coordinates ourselves.
-/// </summary>
+/// <summary>Renders the "removed lines" inline red strip via VS's <see cref="InterLineAdornmentTag"/> primitive.</summary>
 [Export(typeof(IViewTaggerProvider))]
 [ContentType("text")]
 [TextViewRole(PredefinedTextViewRoles.Document)]
@@ -32,7 +27,7 @@ public sealed class HunkRemovedLinesTaggerProvider : IViewTaggerProvider
     public ITagger<T>? CreateTagger<T>(ITextView textView, ITextBuffer buffer) where T : ITag
     {
         if (textView is not IWpfTextView wpf) return null;
-        // Only attach to the view's primary buffer (skip projections / peek).
+        // Skip projections / peek windows.
         if (textView.TextBuffer != buffer) return null;
         var tagger = wpf.Properties.GetOrCreateSingletonProperty(
             typeof(HunkRemovedLinesTagger),
@@ -45,16 +40,10 @@ internal sealed class HunkRemovedLinesTagger : ITagger<InterLineAdornmentTag>
 {
     static readonly Brush RemovedFill = Frozen(new SolidColorBrush(Color.FromArgb(0x40, 0xE0, 0x40, 0x40)));
     static readonly Brush RemovedText = Frozen(new SolidColorBrush(Color.FromRgb(0xCB, 0x6E, 0x6E)));
-    // Dimmer than RemovedText so the gutter line numbers don't compete
-    // with the actual code content for visual weight.
     static readonly Brush RemovedGutterText = Frozen(new SolidColorBrush(Color.FromRgb(0x96, 0x55, 0x55)));
 
     const double VerticalPadding = 2;
-
-    // Defensive floor for per-line reserved height. Once we adopt the
-    // editor's typeface + size below, _view.LineHeight should match the
-    // WPF rendering height naturally, but a small floor protects against
-    // weirdly-small font configurations.
+    // Defensive floor — _view.LineHeight should match WPF rendering once we adopt the editor's typeface.
     const double MinLineHeight = 14;
 
     readonly IWpfTextView _view;
@@ -72,8 +61,7 @@ internal sealed class HunkRemovedLinesTagger : ITagger<InterLineAdornmentTag>
         _filePath = ResolveFilePath(view);
         if (_filePath is null) return;
         _service.HunksChanged += OnHunksChanged;
-        // Re-fire TagsChanged when the user changes Tools > Options > Fonts
-        // and Colors so the inline block picks up the new typeface.
+        // Refresh on Tools > Options > Fonts and Colors changes.
         _formatMap.ClassificationFormatMappingChanged += OnFormatMappingChanged;
         _view.Closed += OnViewClosed;
     }
@@ -89,18 +77,17 @@ internal sealed class HunkRemovedLinesTagger : ITagger<InterLineAdornmentTag>
         var editorLineHeight = _view.LineHeight > 0 ? _view.LineHeight : 16;
         var lineHeight = Math.Max(editorLineHeight, MinLineHeight);
 
-        // Shift width
         double columnWidth = _view.FormattedLineSource?.ColumnWidth ?? 0;
         if (columnWidth <= 0)
             columnWidth = _formatMap.DefaultTextProperties.FontRenderingEmSize * 0.6;
 
+        // Shift left so content text aligns with tab-indented source code inside method bodies.
         double leftShift = -2 * columnWidth;
 
         foreach (var h in hunks)
         {
             if (h.BaselineLines.Count == 0) continue;
-            // Accepted hunks render only as the marker bar (separately, in
-            // HunkAdornmentManager); no inline removed-block.
+            // Accepted hunks get only the marker bar (in HunkAdornmentManager), no inline strip.
             if (string.Equals(h.State, "accepted", StringComparison.Ordinal)) continue;
 
             int anchorLine = h.CurrentStart;
@@ -121,14 +108,7 @@ internal sealed class HunkRemovedLinesTagger : ITagger<InterLineAdornmentTag>
                     adornmentFactory: factory,
                     isAboveLine: true,
                     initialHeight: height,
-                    // TextRelative anchors the adornment to the character at
-                    // the tag's position (col 0 of the anchor line). When
-                    // the user scrolls horizontally, view-coord 0 moves
-                    // along with the source code, so the red strip moves
-                    // with the text — the same behaviour real lines have.
-                    // ViewRelative used to lock the strip to the viewport's
-                    // left edge, which kept it stationary while the text
-                    // scrolled out from under it.
+                    // TextRelative scrolls with the source code; ViewRelative would pin to the viewport's left edge.
                     horizontalPositioningMode: HorizontalPositioningMode.TextRelative,
                     horizontalOffset: leftShift,
                     removalCallback: null));
@@ -137,19 +117,12 @@ internal sealed class HunkRemovedLinesTagger : ITagger<InterLineAdornmentTag>
 
     UIElement BuildAdornment(HunkInfo h, double tagHeight)
     {
-        // Pick up the editor's actual typeface + size so the inline block
-        // looks like a real source line in whatever font the user has
-        // configured. DefaultTextProperties carries the editor's plain-text
-        // formatting (font family, weight, style, render-em size).
+        // Editor's actual typeface + size so the strip looks like a real source line.
         var defaults = _formatMap.DefaultTextProperties;
         var typeface = defaults.Typeface;
         double fontSize = defaults.FontRenderingEmSize;
 
-        // Two-column layout: a dim gutter showing the ORIGINAL line numbers
-        // (1-based) of each removed line + the line content itself. Helps
-        // distinguish multiple red strips that sit close together — without
-        // numbers it's not always obvious which removed line belongs to
-        // which hunk.
+        // Two columns: dim line-number gutter + selectable line-content TextBox.
         var lineNumbers = new System.Text.StringBuilder();
         for (int i = 0; i < h.BaselineLines.Count; i++)
         {
@@ -167,10 +140,7 @@ internal sealed class HunkRemovedLinesTagger : ITagger<InterLineAdornmentTag>
             FontSize = fontSize,
             Foreground = RemovedGutterText,
             TextAlignment = TextAlignment.Right,
-            // Top/bottom must match the TextBox padding so rows align.
-            // Tightened L/R from 6 to 4 to pull the content text ~1 char
-            // closer to the strip's left edge — was indented further than
-            // the source code on the lines around it.
+            // V-padding matches the TextBox below so rows align.
             Padding = new Thickness(4, VerticalPadding, 4, VerticalPadding),
             IsHitTestVisible = false,
             VerticalAlignment = VerticalAlignment.Top,
@@ -183,9 +153,7 @@ internal sealed class HunkRemovedLinesTagger : ITagger<InterLineAdornmentTag>
             IsReadOnlyCaretVisible = false,
             BorderThickness = new Thickness(0),
             Background = Brushes.Transparent,
-            // Top/bottom must match the gutter Padding so rows align.
-            // No left-padding — the gutter's own right-padding already
-            // gives breathing room between numbers and code.
+            // V-padding matches the gutter so rows align; gutter's own R-padding gives breathing room.
             Padding = new Thickness(0, VerticalPadding, 4, VerticalPadding),
             FontFamily = typeface.FontFamily,
             FontStyle = typeface.Style,
@@ -209,10 +177,7 @@ internal sealed class HunkRemovedLinesTagger : ITagger<InterLineAdornmentTag>
         grid.Children.Add(gutter);
         grid.Children.Add(content);
 
-        // Don't pin Width — the Border sizes to its content. Combined with
-        // TextRelative tag positioning, this makes the strip behave like a
-        // real source line: as wide as its content, scrolls with the
-        // editor when the user pans horizontally.
+        // No fixed Width — Border sizes to content so the strip scales like a real source line.
         return new Border
         {
             Child = grid,
@@ -231,13 +196,11 @@ internal sealed class HunkRemovedLinesTagger : ITagger<InterLineAdornmentTag>
     void OnFormatMappingChanged(object? sender, EventArgs e) =>
         FireTagsChangedForWholeSnapshot();
 
+    // Invalidate every tag — the host only tells us a path changed, not which lines.
     void FireTagsChangedForWholeSnapshot()
     {
         var snapshot = _view.TextSnapshot;
         if (snapshot.Length == 0) return;
-        // Invalidate tags across the full snapshot — the host doesn't
-        // tell us which lines changed, so let VS re-call GetTags for the
-        // visible spans.
         try { TagsChanged?.Invoke(this, new SnapshotSpanEventArgs(new SnapshotSpan(snapshot, 0, snapshot.Length))); }
         catch (Exception ex)
         {
