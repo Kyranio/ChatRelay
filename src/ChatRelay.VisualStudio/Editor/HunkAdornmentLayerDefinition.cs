@@ -5,27 +5,16 @@ using Microsoft.VisualStudio.Utilities;
 namespace ChatRelay.Editor;
 
 /// <summary>
-/// Names + orders the two adornment layers the hunk renderer uses.
-///
-/// <para>
-/// Two layers, not one, because the renderer's outputs split into two
-/// z-ordering classes:
+/// Names the two adornment layers used by the hunk renderer.
 /// <list type="bullet">
-///   <item><c>ChatRelayHunks</c> (background) — turquoise highlight
-///   rectangle behind the model's new lines plus the accepted-hunk
-///   marker bar. Drawn between Selection and Text so the source code
-///   stays the topmost visible content and selection sweeps still
-///   look natural.</item>
-///   <item><c>ChatRelayHunksOverlay</c> (foreground) — the "removed
-///   lines" expander and the accept/reject button row. These are
-///   interactive controls anchored in row-space below the highlighted
-///   lines; they must sit ABOVE Text or the editor's own text drawn
-///   in those rows paints over the buttons and the ghost box body,
-///   making the box look transparent and the controls hard to find.
-///   Drawn after Caret so the caret stays visible if the user clicks
-///   into the read-only ghost TextBox.</item>
+///   <item><c>ChatRelayHunks</c> — turquoise highlight, drawn between
+///   Selection and Text so source code stays the topmost visible
+///   content and selection sweeps still look natural.</item>
+///   <item><c>ChatRelayHunksOverlay</c> — accept/reject buttons, drawn
+///   above Text and Caret so they're hit-testable and don't lose focus
+///   when the user clicks into the editor (which is the failure mode
+///   of the popup-agent / SpaceReservationManager approach).</item>
 /// </list>
-/// </para>
 /// </summary>
 public sealed class HunkAdornmentLayerDefinition
 {

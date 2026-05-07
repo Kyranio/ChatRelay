@@ -85,7 +85,29 @@ internal sealed class HunkRemovedLinesTagger : ITagger<InterLineAdornmentTag>
             int anchorLine = h.CurrentStart;
             if (anchorLine < 0 || anchorLine >= snapshot.LineCount) continue;
 
-            var anchorPos = snapshot.GetLineFromLineNumber(anchorLine).Start;
+            // Anchor on the line BEFORE the hunk and reserve space BELOW it
+            // (rather than on the hunk's first line and reserving space
+            // ABOVE it). VS CodeLens ("N references") also reserves top-space
+            // on the same line — when we both grabbed that gap our strip's
+            // first row got squashed underneath the CodeLens row. Reserving
+            // bottom-space on N-1 takes a fresh, uncontended gap and visually
+            // lands the strip above the CodeLens row, where it belongs.
+            //
+            // Falls back to the original above-line-0 placement when the
+            // hunk starts at the very top of the file (no preceding line).
+            SnapshotPoint anchorPos;
+            bool isAboveLine;
+            if (anchorLine > 0)
+            {
+                anchorPos = snapshot.GetLineFromLineNumber(anchorLine - 1).Start;
+                isAboveLine = false;
+            }
+            else
+            {
+                anchorPos = snapshot.GetLineFromLineNumber(anchorLine).Start;
+                isAboveLine = true;
+            }
+
             var tagSpan = new SnapshotSpan(anchorPos, 0);
             if (!AnyIntersects(spans, tagSpan)) continue;
 
@@ -98,7 +120,7 @@ internal sealed class HunkRemovedLinesTagger : ITagger<InterLineAdornmentTag>
                 tagSpan,
                 new InterLineAdornmentTag(
                     adornmentFactory: factory,
-                    isAboveLine: true,
+                    isAboveLine: isAboveLine,
                     initialHeight: height,
                     // TextRelative scrolls with the source code; ViewRelative would pin to the viewport's left edge.
                     horizontalPositioningMode: HorizontalPositioningMode.TextRelative,

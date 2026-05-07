@@ -28,6 +28,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="DiffPlex" Version="1.9.0" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- Lets ChangeTrackerTests in the integration-test project drive
          OnExternalFileChange directly instead of waiting on real FS events,
          which would make the tests slow and flaky. -->

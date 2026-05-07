@@ -108,27 +108,29 @@ public sealed class ChangeTrackerTests : IDisposable
     }
 
     [Fact]
-    public void Accept_marks_proposal_accepted_without_touching_disk()
+    public void Accept_folds_into_baseline_and_clears_proposal()
     {
+        // Accept = "this is the new truth." Baseline absorbs LastApplied,
+        // so diff(Baseline, LastApplied) is empty and the proposal
+        // disappears. Disk is left alone (the model already wrote it).
         var path = MakeFile("foo.cs", "before");
         EditCycle(path, "after");
 
         Assert.True(_tracker.Accept(SessionId, path));
 
         Assert.Equal("after", File.ReadAllText(path));     // disk untouched
-        var p = Assert.Single(_tracker.Snapshot(SessionId).Proposals);
-        Assert.Equal("accepted", p.State);
+        Assert.Empty(_tracker.Snapshot(SessionId).Proposals);
     }
 
     // ---- Deny-after-accept regression --------------------------------
 
     [Fact]
-    public void Deny_after_accept_is_noop_because_accepted_is_set_in_stone()
+    public void Deny_after_accept_is_noop_with_no_proposal_remaining()
     {
-        // Under the simplified "users only remove" model, accepted
-        // changes are permanent — Deny only reverts OPEN hunks. Once a
-        // file has been wholesale-accepted there are no open hunks, so
-        // Deny is a no-op. The user reverts via the editor's undo stack.
+        // Once a file has been accepted there are no open hunks (Baseline
+        // absorbed the change), so Deny is a no-op and there's no
+        // "accepted" proposal to display either — accepted content is
+        // simply the new baseline.
         var path = MakeFile("foo.cs", "before");
         EditCycle(path, "after");
         _tracker.Accept(SessionId, path);
@@ -136,36 +138,51 @@ public sealed class ChangeTrackerTests : IDisposable
 
         Assert.False(_tracker.Deny(SessionId, path));
 
-        // Disk and tracker state intact — accepted change preserved.
         Assert.Equal("after", File.ReadAllText(path));
         var snap = _tracker.Snapshot(SessionId);
-        var p = Assert.Single(snap.Proposals);
-        Assert.Equal("accepted", p.State);
+        Assert.Empty(snap.Proposals);
         Assert.Empty(snap.Denials);
     }
 
     [Fact]
-    public void Deny_with_partial_accept_reverts_open_only_and_keeps_accepted_hunks()
+    public void Deny_after_clear_then_refill_reverts_to_cleared_state()
     {
-        // When a file has both accepted and open hunks, per-file Deny
-        // should leave the accepted hunks alone and only revert the
-        // open ones — same semantics as DenyAllOpen but scoped to one
-        // file.
-        var path = MakeFile("multi.cs", "a\nb\nc\n");
-        EditCycle(path, "A\nb\nC\n");                  // two model hunks
-        var firstHunk = _tracker.Snapshot(SessionId).Proposals[0].Hunks[0];
-        // Accept just the first hunk.
-        Assert.True(_tracker.AcceptHunk(SessionId, path, firstHunk.BaselineStart, firstHunk.BaselineCount));
+        // Regression for the "deny restores pre-accept content" bug.
+        // Flow: model clears the file, user accepts (clear becomes the
+        // truth), model fills it back up, user denies. Deny must revert
+        // to the CLEARED state (last accepted truth), NOT the original.
+        var path = MakeFile("foo.cs", "old1\nold2\nold3\n");
+        EditCycle(path, "");                              // clear
+        _tracker.Accept(SessionId, path);                 // cleared state is now the truth
+        EditCycle(path, "new1\nnew2\nnew3\n");            // refill
 
-        // Deny the file — only the still-open second hunk should revert.
         Assert.True(_tracker.Deny(SessionId, path));
 
-        Assert.Equal("A\nb\nc\n", File.ReadAllText(path));
+        // Reverts to the post-accept state (empty), not the original.
+        Assert.Equal("", File.ReadAllText(path));
+    }
+
+    [Fact]
+    public void Deny_with_partial_accept_reverts_open_only_keeps_accepted_in_baseline()
+    {
+        // Accept-then-Deny is the per-hunk version of the regression: the
+        // first hunk gets folded into Baseline (becomes the new truth),
+        // Deny on the file reverts only the still-open second hunk to
+        // that updated Baseline. Accepted change is preserved on disk.
+        var path = MakeFile("multi.cs", "a\nb\nc\nd\ne\nf\n");
+        EditCycle(path, "A\nb\nc\nd\ne\nF\n");          // two model hunks (gap > CoalesceGap)
+        var firstHunk = _tracker.Snapshot(SessionId).Proposals[0].Hunks[0];
+        // Accept just the first hunk → folds into Baseline.
+        Assert.True(_tracker.AcceptHunk(SessionId, path, firstHunk.BaselineStart, firstHunk.BaselineCount));
+
+        // Deny the file — reverts only the still-open second hunk.
+        Assert.True(_tracker.Deny(SessionId, path));
+
+        // First model edit ('a' → 'A') survives; second reverted.
+        Assert.Equal("A\nb\nc\nd\ne\nf\n", File.ReadAllText(path));
         var snap = _tracker.Snapshot(SessionId);
-        var p = Assert.Single(snap.Proposals);
-        // Accepted hunk preserved; open one gone.
-        var remaining = Assert.Single(p.Hunks);
-        Assert.Equal("accepted", remaining.State);
+        // No proposal left — Baseline matches disk again.
+        Assert.Empty(snap.Proposals);
         // Denial stashes the pre-deny content so redo can bring it back.
         var d = Assert.Single(snap.Denials);
         Assert.Single(d.Entries);

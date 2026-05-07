@@ -164,15 +164,14 @@ public sealed class ChangeTracker
         {
             if (!s.Files.TryGetValue(NormalisePath(filePath), out var f)) return false;
             if (!f.HasProposal) return false;
-            // Whole-file accept: lock in the current LastApplied as Accepted,
-            // AND populate AcceptedHunks with every current hunk so per-hunk
-            // reject after a whole-file accept can correctly identify which
-            // hunks need to be reverted in Accepted vs. just LastApplied.
+            // Make the model's current content the new truth: Baseline
+            // matches disk, no open hunks remain, future model edits diff
+            // from here. Deny on a SUBSEQUENT change reverts to this state
+            // (not the pre-accept original) — that's the whole point.
+            f.Baseline = f.LastApplied;
             f.Accepted = f.LastApplied;
-            f.IsAccepted = true;
             f.AcceptedHunks.Clear();
-            foreach (var h in LineDiff.ComputeHunks(f.Baseline, f.LastApplied))
-                f.AcceptedHunks.Add(MakeKey(h));
+            f.IsAccepted = true;
             changed = true;
         }
         if (changed) FireNotify(sessionId);
@@ -196,22 +195,18 @@ public sealed class ChangeTracker
             if (!s.Files.TryGetValue(NormalisePath(filePath), out var f)) return false;
 
             var hunks = LineDiff.ComputeHunks(f.Baseline, f.LastApplied);
-            var hunk = FindHunkByCoords(hunks, baselineStart, baselineCount);
-            if (hunk is null) return false;
-            var key = MakeKey(hunk.Value);
-            if (f.AcceptedHunks.Contains(key)) return false;   // already accepted
+            var hunkOpt = FindHunkByCoords(hunks, baselineStart, baselineCount);
+            if (hunkOpt is null) return false;
+            var hunk = hunkOpt.Value;
 
-            // Project the hunk's baseline position into Accepted-coordinates
-            // by shifting for previously-accepted hunks that come before it.
-            int projected = ProjectBaselineToAccepted(f, hunks, baselineStart);
-            f.Accepted = LineDiff.SpliceLines(f.Accepted, projected, hunk.Value.OldCount, hunk.Value.NewLines);
-            f.AcceptedHunks.Add(key);
-
-            // If every hunk is now accepted, the file matches LastApplied —
-            // mirror the whole-file-accepted IsAccepted flag.
-            if (string.Equals(f.Accepted, f.LastApplied, StringComparison.Ordinal))
+            // Fold the hunk's new-side content into Baseline at its baseline
+            // position. The hunk vanishes from the next diff, other hunks
+            // stay open. Subsequent model edits diff against this updated
+            // Baseline, so Deny on a later change reverts to here.
+            f.Baseline = LineDiff.SpliceLines(f.Baseline, baselineStart, baselineCount, hunk.NewLines);
+            f.Accepted = f.Baseline;
+            if (string.Equals(f.Baseline, f.LastApplied, StringComparison.Ordinal))
                 f.IsAccepted = true;
-
             changed = true;
         }
         if (changed) FireNotify(sessionId);
@@ -505,11 +500,12 @@ public sealed class ChangeTracker
             foreach (var f in s.Files.Values)
             {
                 if (!f.HasOpenChanges) continue;
+                // Same fold-into-Baseline semantics as Accept — the model's
+                // current content becomes the new truth for every file.
+                f.Baseline = f.LastApplied;
                 f.Accepted = f.LastApplied;
-                f.IsAccepted = true;
                 f.AcceptedHunks.Clear();
-                foreach (var h in LineDiff.ComputeHunks(f.Baseline, f.LastApplied))
-                    f.AcceptedHunks.Add(MakeKey(h));
+                f.IsAccepted = true;
                 any = true;
             }
         }

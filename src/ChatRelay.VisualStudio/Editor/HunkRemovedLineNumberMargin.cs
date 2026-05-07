@@ -124,13 +124,45 @@ internal sealed class HunkRemovedLineNumberMargin : Canvas, IWpfTextViewMargin
             int anchorLine = h.CurrentStart;
             if (anchorLine < 0 || anchorLine >= snapshot.LineCount) continue;
 
-            var anchorPos = snapshot.GetLineFromLineNumber(anchorLine).Start;
+            // Mirror the tagger's anchor choice: when the hunk doesn't start
+            // on line 0, the strip is reserved BELOW line N-1 (so it lands
+            // above any CodeLens row VS may insert above line N). Otherwise
+            // it falls back to the above-line-N placement.
+            SnapshotPoint anchorPos;
+            bool isAboveLine;
+            if (anchorLine > 0)
+            {
+                anchorPos = snapshot.GetLineFromLineNumber(anchorLine - 1).Start;
+                isAboveLine = false;
+            }
+            else
+            {
+                anchorPos = snapshot.GetLineFromLineNumber(anchorLine).Start;
+                isAboveLine = true;
+            }
+
             var view = _view.TextViewLines.GetTextViewLineContainingBufferPosition(anchorPos);
             if (view is null) continue;
 
-            // Reserved gap = [Top, TextTop]. If the tagger hasn't reserved anything, skip.
-            double reservedTop = view.Top;
-            double reservedHeight = view.TextTop - view.Top;
+            // ITextViewLine.Top / TextTop / TextBottom / Bottom are in buffer
+            // coordinates (the adornment-layer canvas applies the scroll
+            // transform implicitly). Our margin's Canvas sits OUTSIDE that
+            // transform, so we must subtract ViewportTop ourselves — without
+            // it the numbers stay pinned to the document position they had at
+            // first paint and visibly stick to the screen as the user scrolls.
+            double reservedTop, reservedHeight;
+            if (isAboveLine)
+            {
+                // Gap = [Top, TextTop] above the anchor line.
+                reservedTop = view.Top - _view.ViewportTop;
+                reservedHeight = view.TextTop - view.Top;
+            }
+            else
+            {
+                // Gap = [TextBottom, Bottom] below the anchor line.
+                reservedTop = view.TextBottom - _view.ViewportTop;
+                reservedHeight = view.Bottom - view.TextBottom;
+            }
             if (reservedHeight < lineHeight - 2) continue;
 
             // Each baseline line gets one editor-line-height row inside the reserved gap.
