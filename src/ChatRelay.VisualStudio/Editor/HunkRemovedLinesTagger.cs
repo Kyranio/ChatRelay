@@ -40,7 +40,6 @@ internal sealed class HunkRemovedLinesTagger : ITagger<InterLineAdornmentTag>
 {
     static readonly Brush RemovedFill = Frozen(new SolidColorBrush(Color.FromArgb(0x40, 0xE0, 0x40, 0x40)));
     static readonly Brush RemovedText = Frozen(new SolidColorBrush(Color.FromRgb(0xCB, 0x6E, 0x6E)));
-    static readonly Brush RemovedGutterText = Frozen(new SolidColorBrush(Color.FromRgb(0x96, 0x55, 0x55)));
 
     const double VerticalPadding = 2;
     // Defensive floor — _view.LineHeight should match WPF rendering once we adopt the editor's typeface.
@@ -77,13 +76,6 @@ internal sealed class HunkRemovedLinesTagger : ITagger<InterLineAdornmentTag>
         var editorLineHeight = _view.LineHeight > 0 ? _view.LineHeight : 16;
         var lineHeight = Math.Max(editorLineHeight, MinLineHeight);
 
-        double columnWidth = _view.FormattedLineSource?.ColumnWidth ?? 0;
-        if (columnWidth <= 0)
-            columnWidth = _formatMap.DefaultTextProperties.FontRenderingEmSize * 0.6;
-
-        // Shift left so content text aligns with tab-indented source code inside method bodies.
-        double leftShift = -2 * columnWidth;
-
         foreach (var h in hunks)
         {
             if (h.BaselineLines.Count == 0) continue;
@@ -110,41 +102,19 @@ internal sealed class HunkRemovedLinesTagger : ITagger<InterLineAdornmentTag>
                     initialHeight: height,
                     // TextRelative scrolls with the source code; ViewRelative would pin to the viewport's left edge.
                     horizontalPositioningMode: HorizontalPositioningMode.TextRelative,
-                    horizontalOffset: leftShift,
+                    horizontalOffset: 0,
                     removalCallback: null));
         }
     }
 
+    // The strip is now CONTENT-ONLY. Line numbers live in a sibling
+    // IWpfTextViewMargin (HunkRemovedLineNumberMargin) so they sit
+    // outside the text area and aren't clipped at view-coord 0.
     UIElement BuildAdornment(HunkInfo h, double tagHeight)
     {
-        // Editor's actual typeface + size so the strip looks like a real source line.
         var defaults = _formatMap.DefaultTextProperties;
         var typeface = defaults.Typeface;
         double fontSize = defaults.FontRenderingEmSize;
-
-        // Two columns: dim line-number gutter + selectable line-content TextBox.
-        var lineNumbers = new System.Text.StringBuilder();
-        for (int i = 0; i < h.BaselineLines.Count; i++)
-        {
-            if (i > 0) lineNumbers.Append('\n');
-            lineNumbers.Append((h.BaselineStart + i + 1).ToString());
-        }
-
-        var gutter = new TextBlock
-        {
-            Text = lineNumbers.ToString(),
-            FontFamily = typeface.FontFamily,
-            FontStyle = typeface.Style,
-            FontWeight = typeface.Weight,
-            FontStretch = typeface.Stretch,
-            FontSize = fontSize,
-            Foreground = RemovedGutterText,
-            TextAlignment = TextAlignment.Right,
-            // V-padding matches the TextBox below so rows align.
-            Padding = new Thickness(4, VerticalPadding, 4, VerticalPadding),
-            IsHitTestVisible = false,
-            VerticalAlignment = VerticalAlignment.Top,
-        };
 
         var content = new TextBox
         {
@@ -153,7 +123,6 @@ internal sealed class HunkRemovedLinesTagger : ITagger<InterLineAdornmentTag>
             IsReadOnlyCaretVisible = false,
             BorderThickness = new Thickness(0),
             Background = Brushes.Transparent,
-            // V-padding matches the gutter so rows align; gutter's own R-padding gives breathing room.
             Padding = new Thickness(0, VerticalPadding, 4, VerticalPadding),
             FontFamily = typeface.FontFamily,
             FontStyle = typeface.Style,
@@ -169,18 +138,10 @@ internal sealed class HunkRemovedLinesTagger : ITagger<InterLineAdornmentTag>
             Foreground = RemovedText,
         };
 
-        var grid = new Grid();
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        Grid.SetColumn(gutter, 0);
-        Grid.SetColumn(content, 1);
-        grid.Children.Add(gutter);
-        grid.Children.Add(content);
-
         // No fixed Width — Border sizes to content so the strip scales like a real source line.
         return new Border
         {
-            Child = grid,
+            Child = content,
             Background = RemovedFill,
             BorderThickness = new Thickness(0),
             Height = tagHeight,
