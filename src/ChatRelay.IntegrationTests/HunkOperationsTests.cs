@@ -77,14 +77,61 @@ public sealed class HunkOperationsTests : IDisposable
     }
 
     [Fact]
-    public void ComputeHunks_two_separate_changes_become_two_hunks()
+    public void ComputeHunks_substantive_gap_splits_into_two_hunks()
     {
+        // Real preserved code between two edits — keep them separate so
+        // the user sees two distinct change regions.
         var hunks = LineDiff.ComputeHunks(
-            "a\nb\nc\nd\ne\n",
-            "A\nb\nc\nD\ne\n");
+            "a\nkeep1\nkeep2\nf\n",
+            "A\nkeep1\nkeep2\nF\n");
         Assert.Equal(2, hunks.Count);
         Assert.Equal(0, hunks[0].OldStart);
         Assert.Equal(3, hunks[1].OldStart);
+    }
+
+    [Fact]
+    public void ComputeHunks_whitespace_only_gap_coalesces()
+    {
+        // Two edits separated only by blank lines — the diff aligned them
+        // by accident and we don't want to fragment the model's logical
+        // change around them. Result: one hunk spanning the whole region.
+        var hunks = LineDiff.ComputeHunks(
+            "a\n\n\nd\n",
+            "A\n\n\nD\n");
+        var h = Assert.Single(hunks);
+        Assert.Equal(0, h.OldStart);
+        Assert.Equal(4, h.OldCount);
+        Assert.Equal(new[] { "a", "", "", "d" }, h.OldLines);
+        Assert.Equal(new[] { "A", "", "", "D" }, h.NewLines);
+    }
+
+    [Fact]
+    public void ComputeHunks_short_substantive_gap_does_not_coalesce()
+    {
+        // A single line of real code between two edits is enough to keep
+        // them as distinct hunks — we don't merge across substantive
+        // content no matter how short the gap.
+        var hunks = LineDiff.ComputeHunks(
+            "a\nkeep\nc\n",
+            "A\nkeep\nC\n");
+        Assert.Equal(2, hunks.Count);
+    }
+
+    [Fact]
+    public void ComputeHunks_brace_only_gap_coalesces_method_replacement()
+    {
+        // Replacing a method's signature and body: DiffPlex aligns the
+        // matched `{` and `}` between the two changed regions. Those
+        // are structural noise, not preserved code — coalesce into one
+        // hunk so the user sees a single replacement.
+        var hunks = LineDiff.ComputeHunks(
+            "public void Foo()\n{\n    DoOldThing();\n}\n",
+            "public void Bar()\n{\n    DoNewThing();\n}\n");
+        var h = Assert.Single(hunks);
+        Assert.Contains("public void Foo()", h.OldLines);
+        Assert.Contains("    DoOldThing();", h.OldLines);
+        Assert.Contains("public void Bar()", h.NewLines);
+        Assert.Contains("    DoNewThing();", h.NewLines);
     }
 
     [Fact]
@@ -159,45 +206,46 @@ public sealed class HunkOperationsTests : IDisposable
     }
 
     [Fact]
-    public void AcceptHunk_locks_in_one_of_two_open_hunks()
+    public void AcceptHunk_folds_first_of_two_into_baseline_leaves_second_open()
     {
-        var path = MakeFile("multi.cs", "a\nb\nc\nd\ne\n");
-        EditCycle(path, "A\nb\nc\nD\ne\n");           // two hunks: replace 'a' and 'd'
+        // Gap of 4 unchanged lines (b,c,d,e) keeps the two edits apart;
+        // smaller gaps would coalesce per LineDiff's noise rule.
+        var path = MakeFile("multi.cs", "a\nb\nc\nd\ne\nf\ng\n");
+        EditCycle(path, "A\nb\nc\nd\ne\nF\ng\n");      // two hunks: replace 'a' and 'f'
 
         var snap = _tracker.Snapshot(SessionId);
         var p = Assert.Single(snap.Proposals);
         Assert.Equal(2, p.Hunks.Count);
         Assert.All(p.Hunks, h => Assert.Equal("open", h.State));
 
-        // Accept the first hunk only.
+        // Accept the first hunk only — folds it into Baseline.
         var first = p.Hunks[0];
         Assert.True(_tracker.AcceptHunk(SessionId, path, first.BaselineStart, first.BaselineCount));
 
         var snap2 = _tracker.Snapshot(SessionId);
         var p2 = Assert.Single(snap2.Proposals);
-        // First hunk now accepted, second still open. File is partly accepted —
-        // overall State stays "open" until everything's locked in.
-        Assert.Equal("open", p2.State);
-        Assert.Equal("accepted", p2.Hunks[0].State);
-        Assert.Equal("open", p2.Hunks[1].State);
+        // Only the second hunk remains visible; the first is now part of
+        // the new Baseline (the truth) and no longer surfaces as a hunk.
+        var remaining = Assert.Single(p2.Hunks);
+        Assert.Equal("open", remaining.State);
 
         // Disk untouched — Accept doesn't write.
-        Assert.Equal("A\nb\nc\nD\ne\n", File.ReadAllText(path));
+        Assert.Equal("A\nb\nc\nd\ne\nF\ng\n", File.ReadAllText(path));
     }
 
     [Fact]
     public void RejectHunk_open_reverts_only_that_region_and_keeps_others()
     {
-        var path = MakeFile("multi.cs", "a\nb\nc\nd\ne\n");
-        EditCycle(path, "A\nb\nc\nD\ne\n");
+        var path = MakeFile("multi.cs", "a\nb\nc\nd\ne\nf\ng\n");
+        EditCycle(path, "A\nb\nc\nd\ne\nF\ng\n");
 
         var p = _tracker.Snapshot(SessionId).Proposals[0];
-        // Reject only the second hunk (replacement of 'd').
+        // Reject only the second hunk (replacement of 'f').
         var second = p.Hunks[1];
         Assert.True(_tracker.RejectHunk(SessionId, path, second.BaselineStart, second.BaselineCount));
 
-        // First model edit ('a' → 'A') survives, second reverted ('D' → 'd').
-        Assert.Equal("A\nb\nc\nd\ne\n", File.ReadAllText(path));
+        // First model edit ('a' → 'A') survives, second reverted ('F' → 'f').
+        Assert.Equal("A\nb\nc\nd\ne\nf\ng\n", File.ReadAllText(path));
 
         var snap = _tracker.Snapshot(SessionId);
         var p2 = Assert.Single(snap.Proposals);
@@ -207,11 +255,11 @@ public sealed class HunkOperationsTests : IDisposable
     }
 
     [Fact]
-    public void RejectHunk_refuses_on_accepted_hunk_and_keeps_state_intact()
+    public void RejectHunk_after_accept_finds_no_hunk_and_does_not_revert()
     {
-        // Under the simplified "users only remove" model, accepted hunks
-        // are set in stone — RejectHunk on an accepted hunk must refuse.
-        // The user reverts via the editor's own undo stack instead.
+        // Accept folds the hunk into Baseline, so the same coordinates no
+        // longer match any hunk in the live diff. RejectHunk returns
+        // false (nothing to do), disk stays at the accepted content.
         var path = MakeFile("foo.cs", "a\nb\nc\n");
         EditCycle(path, "a\nB\nc\n");
 
@@ -220,78 +268,69 @@ public sealed class HunkOperationsTests : IDisposable
 
         Assert.False(_tracker.RejectHunk(SessionId, path, firstHunk.BaselineStart, firstHunk.BaselineCount));
 
-        // Disk untouched, hunk still accepted, no denial recorded.
+        // Disk untouched, no denial recorded, no proposal remains.
         Assert.Equal("a\nB\nc\n", File.ReadAllText(path));
         var snap = _tracker.Snapshot(SessionId);
-        var p = Assert.Single(snap.Proposals);
-        Assert.Equal("accepted", p.State);
+        Assert.Empty(snap.Proposals);
         Assert.Empty(snap.Denials);
     }
 
     [Fact]
-    public void RejectHunk_after_AcceptAllOpen_refuses_for_each_accepted_hunk()
+    public void RejectHunk_after_AcceptAllOpen_finds_nothing_to_reject()
     {
-        // Companion to RejectHunk_refuses_on_accepted_hunk: even after the
-        // user accepts everything via AcceptAllOpen, per-hunk reject on
-        // any of the now-accepted hunks must refuse.
+        // AcceptAllOpen folds every open hunk into Baseline, so per-hunk
+        // reject on the (now-baseline) coordinates is a no-op.
         var path = MakeFile("multi.cs", "a\nb\nc\n");
         EditCycle(path, "A\nb\nC\n");
+        var openHunks = _tracker.Snapshot(SessionId).Proposals[0].Hunks;
         Assert.True(_tracker.AcceptAllOpen(SessionId));
 
-        var p = _tracker.Snapshot(SessionId).Proposals[0];
-        foreach (var h in p.Hunks)
+        foreach (var h in openHunks)
             Assert.False(_tracker.RejectHunk(SessionId, path, h.BaselineStart, h.BaselineCount));
 
-        // State unchanged — disk and tracker still have the accepted edits.
+        // Disk has the accepted edits; no proposal remains.
         Assert.Equal("A\nb\nC\n", File.ReadAllText(path));
-        var p2 = Assert.Single(_tracker.Snapshot(SessionId).Proposals);
-        Assert.All(p2.Hunks, h => Assert.Equal("accepted", h.State));
+        Assert.Empty(_tracker.Snapshot(SessionId).Proposals);
     }
 
     [Fact]
-    public void Re_edit_at_same_baseline_coords_with_different_content_returns_to_open()
+    public void Re_edit_after_accept_diffs_against_the_new_baseline()
     {
-        // Regression for the carry-forward bug: previously HunkKey was
-        // (BaselineStart, BaselineCount) only, so a follow-up edit at the
-        // same coords inherited the prior accept-marker. Now the key
-        // includes the new-side content, so a different new content
-        // produces a different key — the new hunk must be open and require
-        // fresh user approval.
+        // Accept folds the prior change into Baseline, so a follow-up
+        // model edit diffs against the post-accept truth. New content
+        // shows as a fresh open hunk — there's no stale "accepted
+        // marker" to carry forward because there are no hunks left
+        // after acceptance.
         var path = MakeFile("foo.cs", "a\nb\nc\n");
-        EditCycle(path, "A\nb\nc\n");                             // hunk: (0,1) → ["A"]
+        EditCycle(path, "A\nb\nc\n");
         var firstHunk = _tracker.Snapshot(SessionId).Proposals[0].Hunks[0];
         Assert.True(_tracker.AcceptHunk(SessionId, path, firstHunk.BaselineStart, firstHunk.BaselineCount));
-        Assert.Equal("accepted", _tracker.Snapshot(SessionId).Proposals[0].Hunks[0].State);
+        Assert.Empty(_tracker.Snapshot(SessionId).Proposals);
 
-        // Model edits the same line again with DIFFERENT content. Same
-        // baseline coords (0,1) but new content "X" instead of "A".
+        // Model edits the same line again with different content.
         EditCycle(path, "X\nb\nc\n");
 
         var newHunk = _tracker.Snapshot(SessionId).Proposals[0].Hunks[0];
         Assert.Equal(0, newHunk.BaselineStart);
-        Assert.Equal(1, newHunk.BaselineCount);
-        Assert.Equal("open", newHunk.State);    // ← was "accepted" before the fix
+        Assert.Equal("open", newHunk.State);
     }
 
     [Fact]
-    public void Re_edit_at_same_baseline_coords_with_same_content_keeps_accepted()
+    public void Re_edit_after_accept_with_same_content_produces_no_proposal()
     {
-        // Counterpart to the test above: if the model regenerates the
-        // same hunk on a subsequent turn (same coords AND same new
-        // content) the prior accept-marker stays applied — the user
-        // already approved this exact change.
+        // If the model regenerates the same content on a subsequent turn,
+        // disk equals the post-accept Baseline → no diff, no proposal,
+        // no UI churn for the user.
         var path = MakeFile("foo.cs", "a\nb\nc\n");
         EditCycle(path, "A\nb\nc\n");
         var firstHunk = _tracker.Snapshot(SessionId).Proposals[0].Hunks[0];
         Assert.True(_tracker.AcceptHunk(SessionId, path, firstHunk.BaselineStart, firstHunk.BaselineCount));
 
-        // Same content as before — the model "rewrote" the file but to
-        // an identical end state. Could happen on a no-op turn.
+        // Same content as before — the model "rewrote" the file to an
+        // identical end state.
         EditCycle(path, "A\nb\nc\n");
 
-        var snap = _tracker.Snapshot(SessionId);
-        var stillThere = snap.Proposals[0].Hunks[0];
-        Assert.Equal("accepted", stillThere.State);
+        Assert.Empty(_tracker.Snapshot(SessionId).Proposals);
     }
 
     // ---- Phase 4.4a: live-buffer extension --------------------------
@@ -367,25 +406,23 @@ public sealed class HunkOperationsTests : IDisposable
     }
 
     [Fact]
-    public void External_edit_outside_an_accepted_hunk_keeps_marker_and_absorbs_user_typing()
+    public void External_edit_outside_an_accepted_region_absorbs_silently()
     {
-        // The accepted marker stays in place when the user edits OUTSIDE
-        // the accepted region. The user's edit absorbs into Baseline so
-        // no new "open" hunk surfaces for it.
-        var path = MakeFile("foo.cs", "a\nb\nc\n");
-        EditCycle(path, "a\nB\nc\n");
+        // After accept the model's change is part of Baseline; a later
+        // user edit elsewhere has no open hunks to extend and no accepted
+        // marker to preserve, so it absorbs into Baseline. End state:
+        // disk and Baseline match, no proposal.
+        var path = MakeFile("foo.cs", "a\nb\nc\nd\ne\nf\n");
+        EditCycle(path, "a\nb\nc\nd\ne\nF\n");
         var firstHunk = _tracker.Snapshot(SessionId).Proposals[0].Hunks[0];
         Assert.True(_tracker.AcceptHunk(SessionId, path, firstHunk.BaselineStart, firstHunk.BaselineCount));
 
-        // User types "X" at the start, leaving the accepted "B" line untouched.
-        WriteWithRetry(path, "X\na\nB\nc\n");
+        // User types "X" at the start, far from the accepted "F" line.
+        WriteWithRetry(path, "X\na\nb\nc\nd\ne\nF\n");
         _tracker.OnExternalFileChange(path);
 
-        var p = Assert.Single(_tracker.Snapshot(SessionId).Proposals);
-        var h = Assert.Single(p.Hunks);
-        // Accepted hunk still accepted, just at the new (shifted) coords.
-        Assert.Equal("accepted", h.State);
-        Assert.Contains("B", h.CurrentLines);
+        Assert.Empty(_tracker.Snapshot(SessionId).Proposals);
+        Assert.Equal("X\na\nb\nc\nd\ne\nF\n", File.ReadAllText(path));
     }
 
     [Fact]
@@ -418,77 +455,27 @@ public sealed class HunkOperationsTests : IDisposable
         var h = _tracker.Snapshot(SessionId).Proposals[0].Hunks[0];
         Assert.True(_tracker.AcceptHunk(SessionId, path, h.BaselineStart, h.BaselineCount));
 
-        // Accept locks in the extended hunk; disk untouched (still has
-        // both lines), Accepted now matches LastApplied.
+        // Accept folds the extended hunk into Baseline. Disk untouched
+        // (still has both the model's "B" and user's "X"), no proposal
+        // remains because the new Baseline matches disk.
         Assert.Equal("a\nB\nX\nc\n", File.ReadAllText(path));
-        var p = _tracker.Snapshot(SessionId).Proposals[0];
-        Assert.Equal("accepted", p.Hunks[0].State);
+        Assert.Empty(_tracker.Snapshot(SessionId).Proposals);
     }
 
     [Fact]
-    public void InvalidateAcceptedHunk_folds_NewLines_into_Baseline_and_hunk_disappears()
+    public void InvalidateAcceptedHunk_is_noop_under_fold_on_accept_model()
     {
-        // User has accepted the model's edit, then types inside that
-        // region. The editor sends invalidate to drop the marker AND
-        // remove the hunk from memory — the user's expectation is
-        // "this is mine now, stop tracking". Implementation: splice
-        // the hunk's NewLines into Baseline so diff(Baseline, LastApplied)
-        // shows nothing for this region.
+        // Accept folds the hunk into Baseline immediately, so by the time
+        // the editor would send InvalidateAcceptedHunk the hunk no longer
+        // exists in the live diff and the RPC returns false. Kept on the
+        // wire for compatibility but the editor doesn't need to call it
+        // anymore — accepts are self-finalizing.
         var path = MakeFile("foo.cs", "a\nb\nc\n");
         EditCycle(path, "a\nB\nc\n");
         var firstHunk = _tracker.Snapshot(SessionId).Proposals[0].Hunks[0];
         Assert.True(_tracker.AcceptHunk(SessionId, path, firstHunk.BaselineStart, firstHunk.BaselineCount));
 
-        Assert.True(_tracker.InvalidateAcceptedHunk(SessionId, path, firstHunk.BaselineStart, firstHunk.BaselineCount));
-
-        var snap = _tracker.Snapshot(SessionId);
-        // No proposal at all — the hunk's contribution is now baked into
-        // Baseline so there's nothing to diff against LastApplied.
-        Assert.Empty(snap.Proposals);
-        // Disk untouched — invalidation is a tracker-side bookkeeping op.
-        Assert.Equal("a\nB\nc\n", File.ReadAllText(path));
-    }
-
-    [Fact]
-    public void InvalidateAcceptedHunk_shifts_other_accepted_hunks_after_the_splice_point()
-    {
-        // Two accepted hunks at different baseline positions. Invalidating
-        // the FIRST one grows Baseline by (NewCount - OldCount) lines, so
-        // the SECOND hunk's BaselineStart needs to shift by that delta.
-        // Without the shift its key would no longer match the live diff
-        // and the snapshot would mis-classify it as "open".
-        var path = MakeFile("foo.cs", "a\nb\nc\nd\ne\n");
-        // Model adds two lines after "a" AND replaces "d" with "D".
-        EditCycle(path, "a\nA1\nA2\nb\nc\nD\ne\n");
-
-        var p = _tracker.Snapshot(SessionId).Proposals[0];
-        Assert.Equal(2, p.Hunks.Count);
-        // Accept BOTH.
-        foreach (var h in p.Hunks)
-            Assert.True(_tracker.AcceptHunk(SessionId, path, h.BaselineStart, h.BaselineCount));
-        Assert.All(_tracker.Snapshot(SessionId).Proposals[0].Hunks,
-            h => Assert.Equal("accepted", h.State));
-
-        // Invalidate the first (insertion at baseline 1, count 0). That
-        // grows Baseline by +2 lines, so the second hunk that was at
-        // baseline 3 should shift to baseline 5.
-        var first = p.Hunks[0];
-        Assert.True(_tracker.InvalidateAcceptedHunk(SessionId, path, first.BaselineStart, first.BaselineCount));
-
-        var p2 = Assert.Single(_tracker.Snapshot(SessionId).Proposals);
-        var stillThere = Assert.Single(p2.Hunks);
-        // Coord-shift verified: second hunk still classified accepted.
-        Assert.Equal("accepted", stillThere.State);
-    }
-
-    [Fact]
-    public void InvalidateAcceptedHunk_is_noop_for_unknown_hunk()
-    {
-        var path = MakeFile("foo.cs", "a\nb\nc\n");
-        EditCycle(path, "a\nB\nc\n");
-        // Hunk wasn't accepted yet — invalidation has nothing to drop.
-        Assert.False(_tracker.InvalidateAcceptedHunk(SessionId, path, 1, 1));
-        // Coordinates that don't match any hunk → also no-op.
+        Assert.False(_tracker.InvalidateAcceptedHunk(SessionId, path, firstHunk.BaselineStart, firstHunk.BaselineCount));
         Assert.False(_tracker.InvalidateAcceptedHunk(SessionId, path, 99, 99));
     }
 

@@ -4,42 +4,15 @@ using ChatRelay.Logging;
 
 namespace ChatRelay.Changes;
 
-/// <summary>
-/// In-memory, per-session change tracker. The host process owns one
-/// instance for its entire lifetime; closing VS terminates the host and
-/// wipes everything — that's the volatility guarantee from the spec.
-///
-/// <para>
-/// Thread-safety: tool-use observations arrive on adapter background
-/// threads, RPC calls from the shell arrive on JsonRpc threads.
-/// All mutating operations take the per-session lock; reads on the
-/// snapshot path are protected by the same lock to give the wire DTO a
-/// consistent view.
-/// </para>
-/// </summary>
+/// <summary>In-memory per-session change tracker. Closing VS terminates the host and wipes everything.</summary>
 public sealed class ChangeTracker
 {
     readonly ConcurrentDictionary<string, SessionState> _sessions = new();
 
-    /// <summary>
-    /// Optional callback fired after any state mutation so the host can
-    /// emit <c>onChangesUpdated</c> with the fresh snapshot. Set by
-    /// <see cref="HostService"/> at startup.
-    /// </summary>
+    /// <summary>Fired after any state mutation so the host can emit onChangesUpdated. Set by HostService.</summary>
     public Action<string, SessionChangesSnapshot>? Notify { get; set; }
 
-    /// <summary>
-    /// Workspace root used to scope path filtering and produce display
-    /// paths. Updated by <c>setWorkspace</c> on the host. Null = no
-    /// workspace, in which case nothing is tracked (we don't want to
-    /// follow writes outside any project).
-    ///
-    /// <para>
-    /// Setting this also (re)creates the file-system watcher so external
-    /// edits inside the new workspace can invalidate stale denial entries.
-    /// Setting to null disposes the watcher.
-    /// </para>
-    /// </summary>
+    /// <summary>Workspace root for path filtering and display paths. Null = nothing tracked. Reassigning rebuilds the watcher.</summary>
     public string? WorkspaceRoot
     {
         get => _workspaceRoot;
@@ -54,15 +27,7 @@ public sealed class ChangeTracker
     WorkspaceWatcher? _watcher;
     bool _enableFileSystemWatcher = true;
 
-    /// <summary>
-    /// Controls whether <see cref="WorkspaceRoot"/> spins up the
-    /// background <see cref="WorkspaceWatcher"/>. Default true. Tests
-    /// set this to false before assigning <see cref="WorkspaceRoot"/>
-    /// so they don't race against the watcher firing partial-read
-    /// events during synchronous file writes — the test path calls
-    /// <see cref="OnExternalFileChange"/> directly anyway, so the
-    /// watcher would only add noise.
-    /// </summary>
+    /// <summary>Tests turn this off before assigning WorkspaceRoot so the watcher doesn't race their synchronous writes.</summary>
     public bool EnableFileSystemWatcher
     {
         get => _enableFileSystemWatcher;
@@ -89,46 +54,24 @@ public sealed class ChangeTracker
             ExtensionLogger.Warn("changes", $"Watcher not started: workspace dir does not exist: {_workspaceRoot}");
             return;
         }
-        try
-        {
-            _watcher = new WorkspaceWatcher(_workspaceRoot!, OnExternalFileChange);
-        }
-        catch (Exception ex)
-        {
-            ExtensionLogger.Warn("changes", $"Failed to start workspace watcher: {ex.Message}");
-        }
+        try { _watcher = new WorkspaceWatcher(_workspaceRoot!, OnExternalFileChange); }
+        catch (Exception ex) { ExtensionLogger.Warn("changes", $"Failed to start workspace watcher: {ex.Message}"); }
     }
 
     public SessionChangesSnapshot Snapshot(string sessionId)
     {
         var s = GetOrCreate(sessionId);
-        lock (s.Sync)
-        {
-            return BuildSnapshotLocked(sessionId, s);
-        }
+        lock (s.Sync) return BuildSnapshotLocked(sessionId, s);
     }
 
-    /// <summary>
-    /// Tells the tracker which model is currently driving the session, so
-    /// future tool-use observations can stamp the model onto the file's
-    /// <see cref="FileTracker.LastModel"/>. Wired from <c>HostService</c>'s
-    /// <c>ModelInfo</c> event handler. Calling with a null/empty value
-    /// clears the stored model.
-    /// </summary>
+    /// <summary>Stamps the session's current model name so subsequent tool_use observations pin it onto the FileTracker.</summary>
     public void SetCurrentModel(string sessionId, string? modelDisplayName)
     {
         var s = GetOrCreate(sessionId);
-        lock (s.Sync)
-        {
-            s.CurrentModel = string.IsNullOrEmpty(modelDisplayName) ? null : modelDisplayName;
-        }
+        lock (s.Sync) s.CurrentModel = string.IsNullOrEmpty(modelDisplayName) ? null : modelDisplayName;
     }
 
-    /// <summary>
-    /// Acts on a tool-use observation from any adapter. Internally filters
-    /// to file-mutating tools and to paths inside the current workspace —
-    /// out-of-tree writes are silently ignored per the spec.
-    /// </summary>
+    /// <summary>Filters tool-use observations to file-mutating tools inside the workspace, then advances per-file state.</summary>
     public void Observe(string sessionId, ToolCallObservation obs)
     {
         if (!FileMutatingTools.IsKnown(obs.ToolName)) return;
@@ -145,17 +88,14 @@ public sealed class ChangeTracker
         {
             switch (obs.Phase)
             {
-                case ToolCallPhase.Requested:
-                    EnsureBaselineLocked(s, absolute);
-                    break;
-                case ToolCallPhase.Completed:
-                    UpdateLastAppliedLocked(s, absolute);
-                    break;
+                case ToolCallPhase.Requested: EnsureBaselineLocked(s, absolute); break;
+                case ToolCallPhase.Completed: UpdateLastAppliedLocked(s, absolute); break;
             }
         }
         FireNotify(sessionId);
     }
 
+    /// <summary>Whole-file accept: Baseline absorbs LastApplied. Future diffs and Deny revert to here.</summary>
     public bool Accept(string sessionId, string filePath)
     {
         var s = GetOrCreate(sessionId);
@@ -164,29 +104,14 @@ public sealed class ChangeTracker
         {
             if (!s.Files.TryGetValue(NormalisePath(filePath), out var f)) return false;
             if (!f.HasProposal) return false;
-            // Whole-file accept: lock in the current LastApplied as Accepted,
-            // AND populate AcceptedHunks with every current hunk so per-hunk
-            // reject after a whole-file accept can correctly identify which
-            // hunks need to be reverted in Accepted vs. just LastApplied.
-            f.Accepted = f.LastApplied;
-            f.IsAccepted = true;
-            f.AcceptedHunks.Clear();
-            foreach (var h in LineDiff.ComputeHunks(f.Baseline, f.LastApplied))
-                f.AcceptedHunks.Add(MakeKey(h));
+            f.Baseline = f.LastApplied;
             changed = true;
         }
         if (changed) FireNotify(sessionId);
         return changed;
     }
 
-    /// <summary>
-    /// Accepts a single hunk, identified by its position in the baseline
-    /// (<paramref name="baselineStart"/> + <paramref name="baselineCount"/>).
-    /// Splices the hunk's model-side lines into <c>Accepted</c> at the
-    /// position adjusted for already-accepted hunks; no disk write
-    /// (<c>LastApplied</c> already has the model's content). No-op if the
-    /// hunk doesn't exist in the current diff or is already accepted.
-    /// </summary>
+    /// <summary>Per-hunk accept: folds the hunk's NewLines into Baseline at its baseline coords. Other open hunks stay visible.</summary>
     public bool AcceptHunk(string sessionId, string filePath, int baselineStart, int baselineCount)
     {
         var s = GetOrCreate(sessionId);
@@ -194,43 +119,16 @@ public sealed class ChangeTracker
         lock (s.Sync)
         {
             if (!s.Files.TryGetValue(NormalisePath(filePath), out var f)) return false;
-
-            var hunks = LineDiff.ComputeHunks(f.Baseline, f.LastApplied);
-            var hunk = FindHunkByCoords(hunks, baselineStart, baselineCount);
+            var hunk = FindHunkByCoords(LineDiff.ComputeHunks(f.Baseline, f.LastApplied), baselineStart, baselineCount);
             if (hunk is null) return false;
-            var key = MakeKey(hunk.Value);
-            if (f.AcceptedHunks.Contains(key)) return false;   // already accepted
-
-            // Project the hunk's baseline position into Accepted-coordinates
-            // by shifting for previously-accepted hunks that come before it.
-            int projected = ProjectBaselineToAccepted(f, hunks, baselineStart);
-            f.Accepted = LineDiff.SpliceLines(f.Accepted, projected, hunk.Value.OldCount, hunk.Value.NewLines);
-            f.AcceptedHunks.Add(key);
-
-            // If every hunk is now accepted, the file matches LastApplied —
-            // mirror the whole-file-accepted IsAccepted flag.
-            if (string.Equals(f.Accepted, f.LastApplied, StringComparison.Ordinal))
-                f.IsAccepted = true;
-
+            f.Baseline = LineDiff.SpliceLines(f.Baseline, baselineStart, baselineCount, hunk.Value.NewLines);
             changed = true;
         }
         if (changed) FireNotify(sessionId);
         return changed;
     }
 
-    /// <summary>
-    /// Rejects a single OPEN hunk, identified by baseline coordinates.
-    /// Splices the baseline content back into LastApplied, writes the
-    /// file to disk, and stashes a denial record so the user can redo.
-    ///
-    /// <para>
-    /// Refuses (returns false) on accepted hunks. Per the simplified
-    /// model, accepted hunks are set in stone — the user reverts via the
-    /// editor's own undo stack rather than through this extension. This
-    /// guard prevents both the inline editor and chat-side bulk paths
-    /// from clobbering an accepted change.
-    /// </para>
-    /// </summary>
+    /// <summary>Per-hunk reject: writes Baseline content over the hunk's region in LastApplied + on disk, stashes a redo entry.</summary>
     public bool RejectHunk(string sessionId, string filePath, int baselineStart, int baselineCount)
     {
         var s = GetOrCreate(sessionId);
@@ -238,28 +136,13 @@ public sealed class ChangeTracker
         lock (s.Sync)
         {
             if (!s.Files.TryGetValue(NormalisePath(filePath), out var f)) return false;
-
-            var hunks = LineDiff.ComputeHunks(f.Baseline, f.LastApplied);
-            var hunkOpt = FindHunkByCoords(hunks, baselineStart, baselineCount);
+            var hunkOpt = FindHunkByCoords(LineDiff.ComputeHunks(f.Baseline, f.LastApplied), baselineStart, baselineCount);
             if (hunkOpt is null) return false;
             var hunk = hunkOpt.Value;
-            var key = MakeKey(hunk);
 
-            // Accepted hunks are set in stone — refuse rather than revert.
-            if (f.AcceptedHunks.Contains(key)) return false;
-
-            // Capture pre-reject snapshot for the redo path.
-            var preRejectLastApplied = f.LastApplied;
-
-            // Splice baseline content into LastApplied at the hunk's
-            // current position. Effect: that region now matches Baseline.
-            var newLastApplied = LineDiff.SpliceLines(
-                f.LastApplied, hunk.NewStart, hunk.NewCount, hunk.OldLines);
-
-            try
-            {
-                File.WriteAllText(f.AbsolutePath, newLastApplied);
-            }
+            var preReject = f.LastApplied;
+            var newLastApplied = LineDiff.SpliceLines(f.LastApplied, hunk.NewStart, hunk.NewCount, hunk.OldLines);
+            try { File.WriteAllText(f.AbsolutePath, newLastApplied); }
             catch (Exception ex)
             {
                 ExtensionLogger.Warn("changes", $"Hunk reject write failed for {f.AbsolutePath}: {ex.Message}");
@@ -267,24 +150,14 @@ public sealed class ChangeTracker
             }
 
             f.LastApplied = newLastApplied;
-            // Accepted blob is unaffected — we refused on accepted hunks
-            // earlier, so this hunk wasn't in AcceptedHunks. Other accepted
-            // hunks' contributions stay intact.
-            f.IsAccepted = false;
-
-            // The denial is whole-file: ContentToReapply restores the file
-            // to its pre-reject state in one shot. Simpler than per-hunk
-            // bookkeeping and works regardless of subsequent operations.
-            int linesAdded = hunk.NewCount;
-            int linesRemoved = hunk.OldCount;
             f.Denied.Add(new DeniedChangeRecord
             {
                 Id = Guid.NewGuid().ToString("N"),
                 DeniedAt = DateTime.UtcNow,
-                ContentToReapply = preRejectLastApplied,
+                ContentToReapply = preReject,
                 DiskContentAtDeny = newLastApplied,
-                LinesAdded = linesAdded,
-                LinesRemoved = linesRemoved,
+                LinesAdded = hunk.NewCount,
+                LinesRemoved = hunk.OldCount,
             });
             changed = true;
         }
@@ -292,75 +165,9 @@ public sealed class ChangeTracker
         return changed;
     }
 
-    /// <summary>
-    /// Drops the accept-marker for one hunk and folds the model's accepted
-    /// content into <see cref="FileTracker.Baseline"/> so the hunk
-    /// disappears from the diff entirely — not re-classified as "open".
-    /// Sent by the editor when the user types inside an accepted hunk's
-    /// current line range.
-    ///
-    /// <para>
-    /// Why fold into Baseline rather than just drop the key: the user's
-    /// expectation when modifying an accepted region is "this is mine
-    /// now, stop tracking it." Re-opening would put accept/reject UI back
-    /// over the user's own typing — wrong. Splicing the hunk's
-    /// <c>NewLines</c> into Baseline at <c>(BaselineStart, BaselineCount)</c>
-    /// makes Baseline reflect what disk actually has (the model's
-    /// accepted content), so <c>diff(Baseline, LastApplied) = ∅</c> for
-    /// that region and nothing surfaces in the next snapshot.
-    /// </para>
-    ///
-    /// <para>
-    /// Other accepted hunks AFTER this one in baseline coords need their
-    /// <see cref="HunkKey.BaselineStart"/> shifted by
-    /// <c>(NewLines.Count - OldCount)</c> — Baseline just grew or shrank
-    /// by that much. Keys before the splice point are unaffected.
-    /// </para>
-    ///
-    /// <para>
-    /// No-op if the file isn't tracked, the hunk doesn't exist, or it
-    /// wasn't accepted.
-    /// </para>
-    /// </summary>
-    public bool InvalidateAcceptedHunk(string sessionId, string filePath, int baselineStart, int baselineCount)
-    {
-        var s = GetOrCreate(sessionId);
-        bool changed = false;
-        lock (s.Sync)
-        {
-            if (!s.Files.TryGetValue(NormalisePath(filePath), out var f)) return false;
+    /// <summary>No-op under fold-on-accept (accepted hunks are folded into Baseline immediately). Kept on the wire for compatibility.</summary>
+    public bool InvalidateAcceptedHunk(string sessionId, string filePath, int baselineStart, int baselineCount) => false;
 
-            var hunks = LineDiff.ComputeHunks(f.Baseline, f.LastApplied);
-            var hunkOpt = FindHunkByCoords(hunks, baselineStart, baselineCount);
-            if (hunkOpt is null) return false;
-            var hunk = hunkOpt.Value;
-            var key = MakeKey(hunk);
-            if (!f.AcceptedHunks.Remove(key)) return false;
-
-            // Splice the hunk's new-side content into Baseline at the
-            // hunk's baseline position. Baseline now matches what's on
-            // disk for this region.
-            f.Baseline = LineDiff.SpliceLines(f.Baseline, baselineStart, baselineCount, hunk.NewLines);
-            ShiftAcceptedHunksAfterLocked(f, baselineStart + baselineCount, hunk.NewLines.Count - hunk.OldCount);
-
-            // Re-derive Accepted from the updated Baseline + remaining
-            // accepted hunks. Note: this hunk's contribution is already
-            // baked into Baseline, so it's not double-applied.
-            f.Accepted = ApplyAcceptedHunks(f);
-            // If Baseline now equals LastApplied, no proposal remains —
-            // IsAccepted stays false (we don't auto-flag a vanished file
-            // as "accepted").
-            f.IsAccepted = false;
-            changed = true;
-        }
-        if (changed) FireNotify(sessionId);
-        return changed;
-    }
-
-    // Coordinate-only lookup for the wire-dispatched accept/reject RPCs:
-    // the shell only sends (BaselineStart, BaselineCount), so we locate
-    // the hunk by those alone and build the full HunkKey (including
-    // content) from the resolved hunk.
     static LineDiff.Hunk? FindHunkByCoords(IReadOnlyList<LineDiff.Hunk> hunks, int baselineStart, int baselineCount)
     {
         for (int i = 0; i < hunks.Count; i++)
@@ -369,34 +176,7 @@ public sealed class ChangeTracker
         return null;
     }
 
-    /// <summary>
-    /// Builds a content-aware <see cref="HunkKey"/> for the given hunk.
-    /// Same coordinates + same new-side content → same key. The content
-    /// term is what makes the prior accept marker NOT carry forward when
-    /// the model produces a different hunk at the same baseline coords
-    /// on a follow-up turn.
-    /// </summary>
-    static HunkKey MakeKey(LineDiff.Hunk h) =>
-        new(h.OldStart, h.OldCount, JoinLines(h.NewLines));
-
-    static string JoinLines(IReadOnlyList<string> lines) => string.Join("\n", lines);
-
-    // Maps a Baseline-line-number to its corresponding line in Accepted by
-    // walking ALL hunks the model produced and shifting for those the user
-    // has accepted that lie strictly before the target. ComputeHunks
-    // already returns hunks in OldStart order so no sort is needed.
-    static int ProjectBaselineToAccepted(FileTracker f, IReadOnlyList<LineDiff.Hunk> hunks, int baselineStart)
-    {
-        int projected = baselineStart;
-        foreach (var h in hunks)
-        {
-            if (h.OldStart >= baselineStart) break;
-            if (f.AcceptedHunks.Contains(MakeKey(h)))
-                projected += h.NewCount - h.OldCount;
-        }
-        return projected;
-    }
-
+    /// <summary>Whole-file deny: writes Baseline back to disk, stashes a redo entry.</summary>
     public bool Deny(string sessionId, string filePath)
     {
         var s = GetOrCreate(sessionId);
@@ -404,46 +184,27 @@ public sealed class ChangeTracker
         lock (s.Sync)
         {
             if (!s.Files.TryGetValue(NormalisePath(filePath), out var f)) return false;
-            // Per-file deny under the simplified model: revert OPEN hunks
-            // only, leave accepted hunks intact (they're set in stone).
-            // Effectively a per-file "deny all open" scoped to this file.
-            // No-op if there are no open changes (Accepted already covers
-            // everything that's on disk).
-            if (!f.HasOpenChanges) return false;
+            if (!f.HasProposal) return false;
 
-            // Capture deny payload BEFORE we mutate disk. Counts reflect
-            // ONLY the open delta (Accepted → LastApplied), so the denied
-            // row shows what got rolled back rather than the full
-            // accepted-plus-open history.
-            var counts = LineDiff.Compute(f.Accepted, f.LastApplied);
+            var counts = LineDiff.Compute(f.Baseline, f.LastApplied);
             var record = new DeniedChangeRecord
             {
                 Id = Guid.NewGuid().ToString("N"),
                 DeniedAt = DateTime.UtcNow,
-                ContentToReapply = f.LastApplied,    // pre-deny snapshot for redo
-                DiskContentAtDeny = f.Accepted,      // post-deny disk state (accepted preserved)
+                ContentToReapply = f.LastApplied,
+                DiskContentAtDeny = f.Baseline,
                 LinesAdded = counts.Added,
                 LinesRemoved = counts.Removed,
             };
 
-            try
-            {
-                File.WriteAllText(f.AbsolutePath, f.Accepted);
-            }
+            try { File.WriteAllText(f.AbsolutePath, f.Baseline); }
             catch (Exception ex)
             {
                 ExtensionLogger.Warn("changes", $"Deny write failed for {f.AbsolutePath}: {ex.Message}");
                 return false;
             }
 
-            f.LastApplied = f.Accepted;
-            // f.Accepted unchanged — accepted hunks remain spliced in.
-            // f.AcceptedHunks unchanged — the keys still match against
-            // diff(Baseline, new LastApplied=Accepted).
-            // f.IsAccepted reflects "everything on disk is accepted" now
-            // (since LastApplied == Accepted) — true iff there are any
-            // accepted hunks in this file.
-            f.IsAccepted = f.AcceptedHunks.Count > 0;
+            f.LastApplied = f.Baseline;
             f.Denied.Add(record);
             changed = true;
         }
@@ -461,17 +222,12 @@ public sealed class ChangeTracker
             var record = f.Denied.FirstOrDefault(d => d.Id == denialId);
             if (record is null) return false;
 
-            // Refuse if the file's drifted from the post-deny state. The
-            // workspace watcher catches most drift proactively, but this
-            // belt-and-braces re-read defends against missed events.
             string current;
             try { current = File.ReadAllText(f.AbsolutePath); }
             catch { return false; }
 
             if (!string.Equals(current, record.DiskContentAtDeny, StringComparison.Ordinal))
             {
-                // Drop the now-meaningless entry. Spec: "the removed changes
-                // will be cleared from the session file."
                 f.Denied.Remove(record);
                 changed = true;
             }
@@ -483,11 +239,7 @@ public sealed class ChangeTracker
                     ExtensionLogger.Warn("changes", $"Redo write failed for {f.AbsolutePath}: {ex.Message}");
                     return false;
                 }
-
-                // Re-applying lifts the file back to a proposal state. We do
-                // NOT re-mark it accepted — the user has to decide again.
                 f.LastApplied = record.ContentToReapply;
-                f.IsAccepted = false;
                 f.Denied.Remove(record);
                 changed = true;
             }
@@ -504,12 +256,8 @@ public sealed class ChangeTracker
         {
             foreach (var f in s.Files.Values)
             {
-                if (!f.HasOpenChanges) continue;
-                f.Accepted = f.LastApplied;
-                f.IsAccepted = true;
-                f.AcceptedHunks.Clear();
-                foreach (var h in LineDiff.ComputeHunks(f.Baseline, f.LastApplied))
-                    f.AcceptedHunks.Add(MakeKey(h));
+                if (!f.HasProposal) continue;
+                f.Baseline = f.LastApplied;
                 any = true;
             }
         }
@@ -525,28 +273,24 @@ public sealed class ChangeTracker
         {
             foreach (var f in s.Files.Values)
             {
-                if (!f.HasOpenChanges) continue;
-                var counts = LineDiff.Compute(f.Accepted, f.LastApplied);
+                if (!f.HasProposal) continue;
+                var counts = LineDiff.Compute(f.Baseline, f.LastApplied);
                 var record = new DeniedChangeRecord
                 {
                     Id = Guid.NewGuid().ToString("N"),
                     DeniedAt = DateTime.UtcNow,
                     ContentToReapply = f.LastApplied,
-                    DiskContentAtDeny = f.Accepted,
+                    DiskContentAtDeny = f.Baseline,
                     LinesAdded = counts.Added,
                     LinesRemoved = counts.Removed,
                 };
-                try { File.WriteAllText(f.AbsolutePath, f.Accepted); }
+                try { File.WriteAllText(f.AbsolutePath, f.Baseline); }
                 catch (Exception ex)
                 {
                     ExtensionLogger.Warn("changes", $"Bulk deny write failed for {f.AbsolutePath}: {ex.Message}");
                     continue;
                 }
-                f.LastApplied = f.Accepted;
-                f.IsAccepted = false;
-                // Per-hunk accepts that survived bulk-deny stay valid against
-                // the new (smaller) hunk set; prune any stale keys.
-                PruneStaleAcceptedHunksLocked(f);
+                f.LastApplied = f.Baseline;
                 f.Denied.Add(record);
                 any = true;
             }
@@ -555,158 +299,43 @@ public sealed class ChangeTracker
         return any;
     }
 
-    /// <summary>
-    /// Folds a saved external edit into the file's tracker state under
-    /// the simplified "users only remove" model:
-    /// <list type="bullet">
-    ///   <item>Open hunks are allowed to grow / shrink to absorb user
-    ///   typing inside them.</item>
-    ///   <item>Accepted hunks the user hasn't touched stay accepted (key
-    ///   matches new-diff exactly).</item>
-    ///   <item>Anything else — user edits outside any hunk, edits that
-    ///   change an accepted hunk's content, edits in regions the model
-    ///   never touched — gets <b>absorbed into Baseline</b> silently. No
-    ///   "open" hunk surfaces for it; from the user's POV, that text is
-    ///   their own code now.</item>
-    /// </list>
-    /// Returns true if any tracked hunks remain after the fold.
-    /// </summary>
-    /// <remarks>
-    /// Splices into Baseline are processed in reverse OldStart order so
-    /// each splice's coords stay valid in the still-being-mutated
-    /// Baseline. <see cref="FileTracker.AcceptedHunks"/> entries whose
-    /// <see cref="HunkKey.BaselineStart"/> sits past a splice point get
-    /// shifted by <c>(NewLines.Count - OldCount)</c> so their keys still
-    /// resolve against the post-fold Baseline.
-    /// </remarks>
+    /// <summary>Folds an external user edit: open hunks may grow to swallow user typing inside them; everything else absorbs into Baseline silently.</summary>
     static bool ExtendProposalLocked(FileTracker f, string newDiskContent)
     {
-        // Capture which hunks were OPEN before the fold — those are the
-        // only ones allowed to "absorb" user typing inside them.
-        var oldHunks = LineDiff.ComputeHunks(f.Baseline, f.LastApplied);
         var openOldRanges = new List<(int Start, int Count)>();
-        foreach (var oh in oldHunks)
-        {
-            if (!f.AcceptedHunks.Contains(MakeKey(oh)))
-                openOldRanges.Add((oh.OldStart, oh.OldCount));
-        }
+        foreach (var oh in LineDiff.ComputeHunks(f.Baseline, f.LastApplied))
+            openOldRanges.Add((oh.OldStart, oh.OldCount));
 
         f.LastApplied = newDiskContent;
         var newHunks = LineDiff.ComputeHunks(f.Baseline, f.LastApplied);
 
-        // Decide each new hunk: keep (model-authored, possibly extended
-        // by user typing) or absorb (user-only).
         var toAbsorb = new List<LineDiff.Hunk>();
         foreach (var nh in newHunks)
         {
-            var key = MakeKey(nh);
-            // Identical accepted hunk passing through untouched.
-            if (f.AcceptedHunks.Contains(key)) continue;
-            // Open hunk extension — intersects an open old hunk's range.
             bool intersectsOpen = false;
             foreach (var (start, count) in openOldRanges)
             {
-                if (RangesIntersect(nh.OldStart, nh.OldCount, start, count))
-                {
-                    intersectsOpen = true;
-                    break;
-                }
+                if (RangesIntersect(nh.OldStart, nh.OldCount, start, count)) { intersectsOpen = true; break; }
             }
-            if (intersectsOpen) continue;
-            // Everything else: absorb.
-            toAbsorb.Add(nh);
+            if (!intersectsOpen) toAbsorb.Add(nh);
         }
 
-        // Splice in reverse so each splice's OldStart is still valid in
-        // the partially-updated Baseline.
+        // Splice in reverse so each splice's OldStart stays valid in the still-mutating Baseline.
         toAbsorb.Sort((a, b) => b.OldStart.CompareTo(a.OldStart));
         foreach (var h in toAbsorb)
-        {
             f.Baseline = LineDiff.SpliceLines(f.Baseline, h.OldStart, h.OldCount, h.NewLines);
-            ShiftAcceptedHunksAfterLocked(f, h.OldStart + h.OldCount, h.NewLines.Count - h.OldCount);
-        }
-
-        // Stale accepted keys (e.g. user touched the accepted region —
-        // its content changed and the new-diff hunk has a different key)
-        // need pruning regardless. ApplyAcceptedHunks rebuilds the
-        // Accepted blob from the (possibly shifted) Baseline + survivors.
-        PruneStaleAcceptedHunksLocked(f);
-        f.Accepted = ApplyAcceptedHunks(f);
-        // IsAccepted ⇔ everything currently differing from baseline has
-        // been explicitly accepted, with at least one accepted hunk to
-        // show. After absorbing user edits this is rare but possible
-        // (e.g. user deleted what they added before save).
-        f.IsAccepted = string.Equals(f.Accepted, f.LastApplied, StringComparison.Ordinal)
-            && f.AcceptedHunks.Count > 0;
 
         return f.HasProposal;
     }
 
-    static bool RangesIntersect(int aStart, int aCount, int bStart, int bCount)
-    {
-        // Strict half-open interval intersection: [a, a+aCount) ∩ [b, b+bCount) ≠ ∅
-        // iff aStart < bStart+bCount && bStart < aStart+aCount.
-        return aStart < bStart + bCount && bStart < aStart + aCount;
-    }
-
-    // Shifts the BaselineStart of any AcceptedHunks key whose start sits
-    // at or past <paramref name="boundary"/> by <paramref name="delta"/>
-    // lines. Called after splicing into Baseline so existing keys remain
-    // resolvable against the new Baseline coords. No-op when delta is 0
-    // or there's nothing to shift.
-    static void ShiftAcceptedHunksAfterLocked(FileTracker f, int boundary, int delta)
-    {
-        if (delta == 0 || f.AcceptedHunks.Count == 0) return;
-        var shifted = new HashSet<HunkKey>();
-        foreach (var k in f.AcceptedHunks)
-        {
-            shifted.Add(k.BaselineStart >= boundary
-                ? new HunkKey(k.BaselineStart + delta, k.BaselineCount, k.NewContent)
-                : k);
-        }
-        f.AcceptedHunks.Clear();
-        foreach (var k in shifted) f.AcceptedHunks.Add(k);
-    }
-
-    // Drops AcceptedHunks entries that no longer correspond to a hunk in
-    // the current diff(Baseline, LastApplied). Called whenever LastApplied
-    // changes (model edits, redo, bulk deny) so per-hunk accept state can't
-    // outlive the hunks themselves.
-    static void PruneStaleAcceptedHunksLocked(FileTracker f)
-    {
-        if (f.AcceptedHunks.Count == 0) return;
-        var hunks = LineDiff.ComputeHunks(f.Baseline, f.LastApplied);
-        var valid = new HashSet<HunkKey>();
-        foreach (var h in hunks) valid.Add(MakeKey(h));
-        f.AcceptedHunks.RemoveWhere(k => !valid.Contains(k));
-    }
-
-    // Recomputes the Accepted blob from Baseline + the AcceptedHunks set.
-    // Splices the model's new lines in for each accepted hunk, applied in
-    // reverse baseline-order so earlier coordinates stay valid as we go.
-    static string ApplyAcceptedHunks(FileTracker f)
-    {
-        if (f.AcceptedHunks.Count == 0) return f.Baseline;
-        var hunks = LineDiff.ComputeHunks(f.Baseline, f.LastApplied);
-        var byKey = new Dictionary<HunkKey, LineDiff.Hunk>();
-        foreach (var h in hunks) byKey[MakeKey(h)] = h;
-
-        var content = f.Baseline;
-        // Reverse baseline-order so each splice's coordinates still address
-        // unmodified content (earlier hunks haven't been applied yet).
-        var ordered = f.AcceptedHunks
-            .Where(byKey.ContainsKey)
-            .OrderByDescending(k => k.BaselineStart)
-            .Select(k => byKey[k]);
-        foreach (var h in ordered)
-            content = LineDiff.SpliceLines(content, h.OldStart, h.OldCount, h.NewLines);
-        return content;
-    }
+    /// <summary>Strict half-open interval intersection: [a, a+aCount) ∩ [b, b+bCount) ≠ ∅.</summary>
+    static bool RangesIntersect(int aStart, int aCount, int bStart, int bCount) =>
+        aStart < bStart + bCount && bStart < aStart + aCount;
 
     public int CountOpen(string sessionId)
     {
         var s = GetOrCreate(sessionId);
-        lock (s.Sync) return s.Files.Values.Count(f => f.HasOpenChanges);
+        lock (s.Sync) return s.Files.Values.Count(f => f.HasProposal);
     }
 
     public void ClearSession(string sessionId)
@@ -716,8 +345,7 @@ public sealed class ChangeTracker
 
     // -- Internals -------------------------------------------------------
 
-    SessionState GetOrCreate(string sessionId) =>
-        _sessions.GetOrAdd(sessionId, _ => new SessionState());
+    SessionState GetOrCreate(string sessionId) => _sessions.GetOrAdd(sessionId, _ => new SessionState());
 
     bool IsInsideWorkspace(string absolute)
     {
@@ -742,17 +370,7 @@ public sealed class ChangeTracker
         var key = NormalisePath(absolute);
         if (s.Files.TryGetValue(key, out var existing))
         {
-            // Already tracking. Two sub-cases:
-            //  (a) ExpectingWrite — a previous tool_use this turn already
-            //      flagged us; nothing to do beyond keeping the flag set.
-            //  (b) Disk has drifted since we last observed it (user edited
-            //      between turns and the watcher hasn't caught up yet — or
-            //      the file was racy enough that EnsureBaseline arrived
-            //      first). Treat that as a fresh-start checkpoint: reset
-            //      Baseline to current disk so this turn's diff captures
-            //      the user's intermediate work as the starting point,
-            //      and drop any leftover denials (they referenced an
-            //      obsolete on-disk state).
+            // Disk drifted between turns (user edited and the watcher hasn't caught up): take a fresh checkpoint.
             if (!existing.ExpectingWrite)
             {
                 string? current = TryRead(absolute);
@@ -760,21 +378,13 @@ public sealed class ChangeTracker
                     && !string.Equals(current, existing.LastApplied, StringComparison.Ordinal)
                     && !string.Equals(current, existing.Baseline, StringComparison.Ordinal))
                 {
-                    ExtensionLogger.Info("changes",
-                        $"Refreshing Baseline for {absolute} — disk drifted before tool_use");
+                    ExtensionLogger.Info("changes", $"Refreshing Baseline for {absolute} — disk drifted before tool_use");
                     existing.Baseline = current;
-                    existing.Accepted = current;
                     existing.LastApplied = current;
-                    existing.IsAccepted = false;
-                    existing.AcceptedHunks.Clear();
                     existing.Denied.Clear();
                 }
             }
             existing.ExpectingWrite = true;
-            // Stamp the session's current model onto the file. If a turn
-            // starts before any ModelInfo has arrived, LastModel stays at
-            // its prior value (or null on the very first tool_use), and
-            // gets overwritten the next time around.
             if (s.CurrentModel is not null) existing.LastModel = s.CurrentModel;
             return;
         }
@@ -794,10 +404,9 @@ public sealed class ChangeTracker
             AbsolutePath = absolute,
             DisplayPath = MakeDisplay(absolute),
             Baseline = baseline,
-            Accepted = baseline,         // nothing accepted yet
-            LastApplied = baseline,      // pre-write — model hasn't run yet
-            ExpectingWrite = true,       // tool will write between now and tool_result
-            LastModel = s.CurrentModel,  // null until ModelInfo lands; surfaced in snapshot
+            LastApplied = baseline,
+            ExpectingWrite = true,
+            LastModel = s.CurrentModel,
         };
     }
 
@@ -812,53 +421,18 @@ public sealed class ChangeTracker
         var key = NormalisePath(absolute);
         if (!s.Files.TryGetValue(key, out var f))
         {
-            // Tool_result with no prior tool_use — race or unknown tool.
-            // Treat current disk as both baseline and applied so we at
-            // least don't crash; user-facing diff will be 0/0 until the
-            // next observed write.
+            // tool_result with no prior tool_use — race or unknown tool. Treat current disk as both blobs.
             EnsureBaselineLocked(s, absolute);
-            if (s.Files.TryGetValue(key, out f))
-                f.ExpectingWrite = false;
+            if (s.Files.TryGetValue(key, out f)) f.ExpectingWrite = false;
             return;
         }
-        try
-        {
-            f.LastApplied = File.Exists(absolute) ? File.ReadAllText(absolute) : string.Empty;
-        }
-        catch (Exception ex)
-        {
-            ExtensionLogger.Warn("changes", $"Post-write read failed for {absolute}: {ex.Message}");
-        }
-        // Tool finished — disk is post-write, the watcher's content-match
-        // check (against LastApplied) will correctly identify subsequent
-        // events for this file as our own writes.
+        try { f.LastApplied = File.Exists(absolute) ? File.ReadAllText(absolute) : string.Empty; }
+        catch (Exception ex) { ExtensionLogger.Warn("changes", $"Post-write read failed for {absolute}: {ex.Message}"); }
         f.ExpectingWrite = false;
-
-        // Per-hunk accepts we held may now reference hunks that don't exist
-        // in the new diff — drop stale keys, then recompute the Accepted
-        // blob from Baseline + the surviving accepted hunks so it stays
-        // internally consistent with AcceptedHunks.
-        PruneStaleAcceptedHunksLocked(f);
-        f.Accepted = ApplyAcceptedHunks(f);
-        // Subsequent model edit invalidates any prior denial whose post-deny
-        // disk state no longer matches reality. Per spec: "Once the file is
-        // modified ... the removed changes will be cleared from the session
-        // file." The same rule applies whether the modification came from
-        // the model (this path) or the user (OnExternalFileChange below).
         f.Denied.RemoveAll(d => !string.Equals(d.DiskContentAtDeny, f.LastApplied, StringComparison.Ordinal));
     }
 
-    /// <summary>
-    /// Workspace watcher entry point. Runs whenever <see cref="WorkspaceWatcher"/>
-    /// reports a file change inside the watched root, on a background thread.
-    /// Drops denial entries whose post-deny disk state has drifted.
-    ///
-    /// <para>
-    /// Skips if disk content matches a known clean state (<c>LastApplied</c>
-    /// or <c>Baseline</c>) — that's almost certainly our own write echoing
-    /// back through the watcher and shouldn't invalidate anything.
-    /// </para>
-    /// </summary>
+    /// <summary>Workspace watcher entry. Drops stale denials, folds external edits via ExtendProposalLocked.</summary>
     internal void OnExternalFileChange(string absolutePath)
     {
         var key = NormalisePath(absolutePath);
@@ -872,31 +446,16 @@ public sealed class ChangeTracker
                 if (!session.Files.TryGetValue(key, out var f)) continue;
                 anyTracked = true;
 
-                // Tool just emitted a use-event but tool_result hasn't
-                // arrived to update LastApplied — the on-disk write is the
-                // model's, not the user's. Skip so we don't mis-classify it
-                // as external and clobber state.
                 if (f.ExpectingWrite)
                 {
                     ExtensionLogger.Debug("changes", $"Watcher echo (ExpectingWrite): {absolutePath}");
                     continue;
                 }
 
-                // Read disk INSIDE the lock. Reading before lock-acquire
-                // would let a concurrent Accept/Deny/Redo settle disk +
-                // LastApplied between our read and our state check —
-                // we'd then compare a stale content snapshot against the
-                // freshly-updated LastApplied, mistakenly classifying the
-                // operation's own write as an external edit and dropping
-                // denials that were correctly applied. File-system events
-                // can also fire before the writer has released its lock,
-                // hence the retry-on-IOException loop in TryReadWithRetry.
+                // Read disk inside the lock so a concurrent Accept/Deny/Redo can't settle state between read and check.
                 string? content = TryReadWithRetry(absolutePath);
                 if (content is null) continue;
 
-                // Disk matches a clean state we know about → echo of our own
-                // write or a no-op (e.g. tool that touched but didn't modify).
-                // Don't disturb any denial entries.
                 if (string.Equals(content, f.LastApplied, StringComparison.Ordinal))
                 {
                     ExtensionLogger.Debug("changes", $"Watcher echo (LastApplied match): {absolutePath}");
@@ -908,71 +467,30 @@ public sealed class ChangeTracker
                     continue;
                 }
 
-                // External modification. Three concerns to handle in order:
-                //
-                //   (a) Drop denial records whose post-deny expected state
-                //       doesn't match the new disk content (the surviving-
-                //       denials invariant).
                 var before = f.Denied.Count;
-                var removed = f.Denied.RemoveAll(
-                    d => !string.Equals(d.DiskContentAtDeny, content, StringComparison.Ordinal));
+                var removed = f.Denied.RemoveAll(d => !string.Equals(d.DiskContentAtDeny, content, StringComparison.Ordinal));
 
-                //   (b) Partition-and-absorb. Hunks the user introduced
-                //       outside any open hunk (or by touching an accepted
-                //       hunk) are silently absorbed into Baseline so they
-                //       don't surface as "open" hunks the user has to
-                //       interact with. Only OPEN model hunks may extend
-                //       to swallow user edits inside them. Accepted hunks
-                //       that the user didn't touch keep their key and
-                //       their marker.
-                //
-                //       Rules per the simplified model:
-                //         • Only models create new hunks.
-                //         • Users may extend an open hunk by typing inside.
-                //         • Touching an accepted hunk drops its marker
-                //           and absorbs the region into Baseline (handled
-                //           via key-mismatch + absorb in this partition).
-                //         • All other user edits absorb silently — never
-                //           a new "open" hunk that wasn't authored by the
-                //           model.
                 bool extendedProposal = ExtendProposalLocked(f, content);
-                if (extendedProposal)
-                {
-                    ExtensionLogger.Info("changes",
-                        $"External edit on {absolutePath}: extended proposal "
-                        + $"(dropped {removed}/{before} denial(s), {f.AcceptedHunks.Count} accepted hunk(s) survive)");
-                }
-                else
-                {
-                    ExtensionLogger.Info("changes",
-                        $"External edit on {absolutePath}: dropped {removed}/{before} denial(s)");
-                }
+                ExtensionLogger.Info("changes",
+                    $"External edit on {absolutePath}: dropped {removed}/{before} denial(s)"
+                    + (extendedProposal ? " (extended proposal)" : ""));
 
-                //   (c) If we didn't extend a proposal AND nothing
-                //       meaningful is left, drop the entry entirely so the
-                //       next model touch captures a fresh Baseline
-                //       reflecting the user's intermediate state.
                 bool entryDropped = false;
                 if (!extendedProposal && !f.HasProposal && f.Denied.Count == 0)
                 {
                     session.Files.Remove(key);
                     entryDropped = true;
-                    ExtensionLogger.Info("changes",
-                        $"Dropped tracker entry for {absolutePath} (clean state after external edit)");
+                    ExtensionLogger.Info("changes", $"Dropped tracker entry for {absolutePath} (clean state after external edit)");
                 }
 
                 if (removed > 0 || entryDropped || extendedProposal) changedSessions.Add(kv.Key);
             }
         }
-        if (!anyTracked)
-            ExtensionLogger.Debug("changes", $"Watcher fired for untracked path: {absolutePath}");
+        if (!anyTracked) ExtensionLogger.Debug("changes", $"Watcher fired for untracked path: {absolutePath}");
         foreach (var sid in changedSessions) FireNotify(sid);
     }
 
-    // Up to 5 attempts × 50ms gap = ~250ms of grace for the writer to
-    // release its handle. VS's save sequence (write temp → rename) typically
-    // completes in low single-digit ms, so this is generous. Returns null
-    // if every attempt failed — caller treats that as "ignore this event."
+    /// <summary>Up to 5 × 50ms attempts to ride out the writer's handle release. Returns null if every attempt fails.</summary>
     static string? TryReadWithRetry(string path)
     {
         for (int attempt = 0; attempt < 5; attempt++)
@@ -980,24 +498,12 @@ public sealed class ChangeTracker
             try
             {
                 if (!File.Exists(path)) return string.Empty;
-                // FileShare.ReadWrite so a concurrent writer (the user
-                // saving in VS, or even the model's tool finishing its
-                // write) doesn't fail us with a sharing violation.
-                // Worst case: we read a partially-written buffer; the
-                // content-comparison logic upstream falls through as
-                // "external edit" and the next event resolves it.
                 using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
                 using var sr = new StreamReader(fs);
                 return sr.ReadToEnd();
             }
-            catch (IOException) when (attempt < 4)
-            {
-                Thread.Sleep(50);
-            }
-            catch (UnauthorizedAccessException) when (attempt < 4)
-            {
-                Thread.Sleep(50);
-            }
+            catch (IOException) when (attempt < 4) { Thread.Sleep(50); }
+            catch (UnauthorizedAccessException) when (attempt < 4) { Thread.Sleep(50); }
             catch (Exception ex)
             {
                 ExtensionLogger.Warn("changes", $"Watcher read failed for {path}: {ex.Message}");
@@ -1031,7 +537,6 @@ public sealed class ChangeTracker
                 var hunkInfos = new List<HunkInfo>(hunks.Count);
                 foreach (var h in hunks)
                 {
-                    var key = MakeKey(h);
                     hunkInfos.Add(new HunkInfo(
                         BaselineStart: h.OldStart,
                         BaselineCount: h.OldCount,
@@ -1039,7 +544,7 @@ public sealed class ChangeTracker
                         CurrentCount: h.NewCount,
                         BaselineLines: h.OldLines,
                         CurrentLines: h.NewLines,
-                        State: f.AcceptedHunks.Contains(key) ? "accepted" : "open",
+                        State: "open",
                         Model: f.LastModel));
                 }
                 proposals.Add(new ChangeProposal(
@@ -1047,7 +552,7 @@ public sealed class ChangeTracker
                     AbsolutePath: f.AbsolutePath,
                     LinesAdded: counts.Added,
                     LinesRemoved: counts.Removed,
-                    State: f.IsAccepted && !f.HasOpenChanges ? "accepted" : "open",
+                    State: "open",
                     Hunks: hunkInfos));
             }
 
@@ -1062,11 +567,6 @@ public sealed class ChangeTracker
                             LinesAdded: d.LinesAdded,
                             LinesRemoved: d.LinesRemoved,
                             DeniedAt: d.DeniedAt,
-                            // Stale denials are dropped from f.Denied
-                            // outright (in OnExternalFileChange / Update-
-                            // LastApplied / RedoDenial) — by the time we
-                            // hit this projection, anything still here is
-                            // redoable. Wire field kept for forward-compat.
                             CanRedo: true))
                         .ToList()));
             }
@@ -1084,10 +584,7 @@ public sealed class ChangeTracker
         {
             lock (s.Sync) snap = BuildSnapshotLocked(sessionId, s);
         }
-        else
-        {
-            snap = new SessionChangesSnapshot(sessionId, [], []);
-        }
+        else snap = new SessionChangesSnapshot(sessionId, [], []);
         try { notify(sessionId, snap); }
         catch (Exception ex) { ExtensionLogger.Warn("changes", "Notify threw: " + ex.Message); }
     }
@@ -1096,14 +593,6 @@ public sealed class ChangeTracker
     {
         public readonly object Sync = new();
         public readonly Dictionary<string, FileTracker> Files = new(StringComparer.OrdinalIgnoreCase);
-
-        /// <summary>
-        /// Display name of the model the host most recently announced for
-        /// this session via <c>onModelInfo</c>. Stamped onto each
-        /// <see cref="FileTracker"/> when it sees a tool_use, then surfaced
-        /// in the snapshot so the editor adornment can show "Edited by X".
-        /// Null until the first <c>ModelInfo</c> event lands.
-        /// </summary>
         public string? CurrentModel;
     }
 }

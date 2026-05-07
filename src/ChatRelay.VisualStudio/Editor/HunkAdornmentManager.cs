@@ -13,50 +13,28 @@ using Microsoft.VisualStudio.Text.Formatting;
 
 namespace ChatRelay.Editor;
 
-/// <summary>
-/// Per-editor-view renderer for the turquoise highlight (open hunks),
-/// the accepted-hunk marker bar, and the accept/reject button row.
-/// Listens to <see cref="EditorChangesService.HunksChanged"/> for its
-/// file plus <see cref="IWpfTextView.LayoutChanged"/> /
-/// <see cref="ITextBuffer.Changed"/>, repaints accordingly, and routes
-/// button clicks back to the host via the service callbacks.
-///
-/// <para>
-/// The "removed lines" red block isn't drawn here — that's
-/// <see cref="HunkRemovedLinesTagger"/> producing
-/// <c>InterLineAdornmentTag</c>s. VS handles the gap reservation and
-/// adornment placement; we only render the things that anchor on
-/// existing source lines.
-/// </para>
-/// </summary>
+/// <summary>Per-view renderer for the turquoise highlight + accept/reject button row on each open hunk.</summary>
 sealed class HunkAdornmentManager
 {
-    // Brand turquoise — matches the chat-side ClaudeButtonStyle's accent.
-    static readonly Color AccentColor = Color.FromRgb(0x40, 0xE0, 0xD0);
-    static readonly Brush AccentBrush = Frozen(new SolidColorBrush(AccentColor));
+    static readonly Brush AccentBrush = Frozen(new SolidColorBrush(Color.FromRgb(0x40, 0xE0, 0xD0)));
     static readonly Brush AccentBrushHover = Frozen(new SolidColorBrush(Color.FromRgb(0x5F, 0xE6, 0xD8)));
     static readonly Brush AccentBrushPressed = Frozen(new SolidColorBrush(Color.FromRgb(0x1F, 0x88, 0x81)));
     static readonly Brush HighlightFill = Frozen(new SolidColorBrush(Color.FromArgb(0x35, 0x40, 0xE0, 0xD0)));
+    static readonly Brush PrimaryBorderBrush = Frozen(new SolidColorBrush(Color.FromRgb(0x2E, 0xB6, 0xAB)));
+    static readonly ControlTemplate PrimaryTemplate = BuildButtonTemplate(primary: true);
+    static readonly ControlTemplate SecondaryTemplate = BuildButtonTemplate(primary: false);
+
+    const double ButtonSize = 24;
+    const double ButtonGap = 6;
 
     readonly IWpfTextView _view;
-    // Lazy-resolved: ITextDocument (and therefore the buffer's FilePath)
-    // sometimes attaches AFTER our IWpfTextViewCreationListener fires, so a
-    // construction-time resolve would miss it permanently. We retry from
-    // each event handler until it sticks. Mutable for that reason.
-    string? _filePath;
     readonly EditorChangesService _service;
-    // Background layer (below Text): highlight + accepted marker.
-    // Overlay layer (above Text): buttons — kept above so editor text in
-    // the row doesn't paint over them.
     readonly IAdornmentLayer? _layer;
     readonly IAdornmentLayer? _overlay;
-
-    // Tracked hunks carry an ITrackingSpan so the highlight/buttons
-    // follow buffer edits live without waiting for a host snapshot.
-    // LocallyInvalidated suppresses the marker between the user typing
-    // into an accepted region and the host catching up on next
-    // snapshot — the InvalidateAcceptedHunk RPC drives that catch-up.
     readonly List<TrackedHunk> _tracked = new();
+    // ITextDocument can attach AFTER IWpfTextViewCreationListener fires; resolve lazily from event handlers.
+    string? _filePath;
+    ITextDocument? _doc;
 
     sealed class TrackedHunk
     {
@@ -77,41 +55,36 @@ sealed class HunkAdornmentManager
         catch (Exception ex)
         {
             Debug.WriteLine($"[ChatRelay.editor] Failed to acquire adornment layer: {ex.Message}");
-            _layer = null;
-            _overlay = null;
         }
 
-        // Subscribe unconditionally — _filePath might still be null at
-        // this point (ITextDocument hasn't attached yet) and we need the
-        // event handlers to retry resolution when something later happens
-        // on the view.
         _service.HunksChanged += OnHunksChanged;
         _view.Closed += OnViewClosed;
         _view.LayoutChanged += OnLayoutChanged;
         _view.TextBuffer.Changed += OnBufferChanged;
-
-        // Best-effort initial resolve. If it works, EnsureFilePath also
-        // fires the initial render. If not, the next event handler will
-        // retry resolution.
         EnsureFilePath();
     }
 
-    /// <summary>
-    /// Resolves the buffer's file path lazily. Returns true once we have a
-    /// path; false until ITextDocument attaches. Every event handler calls
-    /// this first so the renderer comes online as soon as the document
-    /// is available — even if that's well after IWpfTextViewCreationListener
-    /// fired. The first time it resolves we also prime the renderer so any
-    /// hunks already cached in EditorChangesService surface immediately.
-    /// </summary>
     bool EnsureFilePath()
     {
         if (_filePath is not null) return true;
-        _filePath = ResolveFilePath(_view);
+        if (!_view.TextBuffer.Properties.TryGetProperty<ITextDocument>(typeof(ITextDocument), out var doc))
+            return false;
+        _doc = doc;
+        _filePath = doc.FilePath;
         if (_filePath is null) return false;
+        _doc.FileActionOccurred += OnFileActionOccurred;
         RebuildTrackedFromService();
         if (_tracked.Count > 0) RenderHunks();
         return true;
+    }
+
+    // VS just replaced the buffer with disk content (host wrote the file): tracking spans are stale, rebuild.
+    void OnFileActionOccurred(object? sender, TextDocumentFileActionEventArgs e)
+    {
+        if ((e.FileActionType & FileActionTypes.ContentLoadedFromDisk) == 0) return;
+        foreach (var t in _tracked) t.LocallyInvalidated = false;
+        RebuildTrackedFromService();
+        RenderHunks();
     }
 
     void OnHunksChanged(string changedPath)
@@ -119,92 +92,45 @@ sealed class HunkAdornmentManager
         if (!EnsureFilePath()) return;
         if (!string.Equals(changedPath, _filePath, StringComparison.OrdinalIgnoreCase)) return;
         RebuildTrackedFromService();
-        Debug.WriteLine($"[ChatRelay.editor] Hunks for {_filePath}: {_tracked.Count} hunk(s)");
         RenderHunks();
     }
 
     void OnLayoutChanged(object? sender, TextViewLayoutChangedEventArgs e)
     {
-        // Layout fires on every reformat / scroll / edit — a good moment to
-        // retry file-path resolution if it failed earlier.
         if (!EnsureFilePath()) return;
         if (_tracked.Count == 0) return;
         RenderHunks();
     }
 
-    // The watcher / host snapshot path can't see in-buffer edits until
-    // the user saves. Two visual responses:
-    //   • Accepted hunk intersected by typing → suppress its marker
-    //     locally; the InvalidateAcceptedHunk RPC tells the host so the
-    //     next snapshot reports it as gone.
-    //   • Open hunk whose model new-lines were ALL undone / backspaced
-    //     out of the buffer → suppress locally; on save the host's diff
-    //     naturally drops the hunk.
-    // Open hunks that simply grew or shrank by user typing need no
-    // special handling — tracking spans follow automatically.
+    // Local-undo detector: hide a hunk visually when the user wipes the model's content from the tracked span.
+    // Skip on full-buffer-replace events (VS reloading from disk) — FileActionOccurred handles those.
     void OnBufferChanged(object? sender, TextContentChangedEventArgs e)
     {
         if (!EnsureFilePath()) return;
         if (_tracked.Count == 0) return;
+        if (IsFullBufferReplace(e)) return;
 
         var snapshot = e.After;
         foreach (var t in _tracked)
         {
             if (t.LocallyInvalidated) continue;
-
             SnapshotSpan current;
             try { current = t.Span.GetSpan(snapshot); }
             catch { continue; }
 
             bool intersects = false;
             foreach (var change in e.Changes)
-            {
-                // IntersectsWith is a strict superset of OverlapsWith —
-                // it also matches zero-width touch at edges, which is
-                // what we want for "did this change reach the hunk".
-                if (change.NewSpan.IntersectsWith(current.Span))
-                {
-                    intersects = true;
-                    break;
-                }
-            }
+                if (change.NewSpan.IntersectsWith(current.Span)) { intersects = true; break; }
             if (!intersects) continue;
 
-            // Open vs accepted have different invalidation rules.
-            if (string.Equals(t.Info.State, "accepted", StringComparison.Ordinal))
-            {
-                // Accepted: any touch drops the marker. Host RPC folds
-                // the hunk into Baseline.
-                t.LocallyInvalidated = true;
-                FireInvalidateAcceptedHunk(t.Info);
-                continue;
-            }
-
-            // Open: a touch is fine (typing inside the hunk is the
-            // normal case — span auto-grows). But if the touch removed
-            // ALL of the model's new lines from the tracked span — e.g.
-            // ctrl+Z, or the user selected the new code and pressed
-            // backspace — the hunk is obsolete and should disappear
-            // visually. The host's view will catch up on next save.
-            if (IsHunkObsolete(t, current))
-                t.LocallyInvalidated = true;
+            if (IsHunkObsolete(t, current)) t.LocallyInvalidated = true;
         }
     }
 
-    /// <summary>
-    /// True iff none of the model's new lines for this open hunk are
-    /// still present in its tracked span. Triggered by ctrl+Z fully
-    /// undoing the model's edit, by the user selecting the inserted
-    /// code and deleting it, or by any other edit that wipes the
-    /// model's content out of that region.
-    ///
-    /// <para>
-    /// Pure-deletion hunks (CurrentLines empty) skip — there's nothing
-    /// to check; their tracked span is zero-width at the join-point.
-    /// Pure-insertion hunks where the span has collapsed to zero
-    /// length are obviously obsolete (the inserted lines are gone).
-    /// </para>
-    /// </summary>
+    static bool IsFullBufferReplace(TextContentChangedEventArgs e) =>
+        e.Changes.Count == 1 && e.Changes[0].OldSpan.Length == e.Before.Length;
+
+    // True iff none of the model's new lines for this hunk are still present in its tracked span.
     static bool IsHunkObsolete(TrackedHunk t, SnapshotSpan current)
     {
         if (t.Info.CurrentLines.Count == 0) return false;
@@ -212,33 +138,11 @@ sealed class HunkAdornmentManager
         string spanText;
         try { spanText = current.GetText(); }
         catch { return false; }
-        // Exact line match — substring would false-positive on common
-        // tokens. Splits on \r\n / \n / \r so we don't mis-match across
-        // newline styles.
         var lines = spanText.Split(new[] { "\r\n", "\n", "\r" }, StringSplitOptions.None);
         var lineSet = new HashSet<string>(lines, StringComparer.Ordinal);
         foreach (var ml in t.Info.CurrentLines)
-        {
             if (lineSet.Contains(ml)) return false;
-        }
         return true;
-    }
-
-    void FireInvalidateAcceptedHunk(HunkInfo h)
-    {
-        var sid = _service.CurrentSessionId;
-        var op = _service.InvalidateAcceptedHunkAsync;
-        if (sid is null || op is null || _filePath is null) return;
-        // Fire-and-forget on a worker thread so JsonRpc exceptions don't
-        // surface on the UI thread.
-        _ = System.Threading.Tasks.Task.Run(async () =>
-        {
-            try { await op(sid, _filePath, h.BaselineStart, h.BaselineCount); }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"[ChatRelay.editor] InvalidateAcceptedHunk failed: {ex.Message}");
-            }
-        });
     }
 
     void RebuildTrackedFromService()
@@ -246,46 +150,31 @@ sealed class HunkAdornmentManager
         _tracked.Clear();
         var hunks = _service.GetHunks(_filePath!);
         if (hunks.Count == 0) return;
-
         var snapshot = _view.TextSnapshot;
         foreach (var h in hunks)
         {
             var span = TryBuildTrackingSpan(h, snapshot);
-            if (span is null) continue;
-            _tracked.Add(new TrackedHunk { Info = h, Span = span! });
+            if (span is not null) _tracked.Add(new TrackedHunk { Info = h, Span = span });
         }
     }
 
-    // Builds an EdgeInclusive tracking span covering the hunk's current
-    // line range. EdgeInclusive matters: the user inserting a newline at
-    // the boundary of the hunk should grow the tracked region (so the
-    // highlight follows). Pure-deletion hunks (CurrentCount=0) get a
-    // zero-width span at the join-point so we can still anchor a UI to
-    // them, but they aren't candidates for "intersected by typing"
-    // since there's nothing to type inside.
+    // EdgeInclusive so user typing at the boundary grows the region. Pure deletions anchor on the join-line full-width.
+    // Returns null if the buffer hasn't caught up to the host's line numbering yet — FileActionOccurred retries.
     static ITrackingSpan? TryBuildTrackingSpan(HunkInfo h, ITextSnapshot snapshot)
     {
         try
         {
-            if (h.CurrentCount > 0
-                && h.CurrentStart >= 0
-                && h.CurrentStart + h.CurrentCount <= snapshot.LineCount)
+            if (h.CurrentCount > 0)
             {
+                if (h.CurrentStart < 0 || h.CurrentStart + h.CurrentCount > snapshot.LineCount) return null;
                 var first = snapshot.GetLineFromLineNumber(h.CurrentStart);
                 var last = snapshot.GetLineFromLineNumber(h.CurrentStart + h.CurrentCount - 1);
-                return snapshot.CreateTrackingSpan(
-                    new SnapshotSpan(first.Start, last.End),
-                    SpanTrackingMode.EdgeInclusive);
+                return snapshot.CreateTrackingSpan(new SnapshotSpan(first.Start, last.End), SpanTrackingMode.EdgeInclusive);
             }
-            // Pure deletion — zero-width anchor at the join-point.
             int anchorLine = Math.Max(0, Math.Min(h.CurrentStart, snapshot.LineCount - 1));
-            var line = snapshot.GetLineFromLineNumber(anchorLine);
-            return snapshot.CreateTrackingSpan(new SnapshotSpan(line.Start, 0), SpanTrackingMode.EdgeExclusive);
+            return snapshot.CreateTrackingSpan(snapshot.GetLineFromLineNumber(anchorLine).Extent, SpanTrackingMode.EdgeExclusive);
         }
-        catch
-        {
-            return null;
-        }
+        catch { return null; }
     }
 
     void RenderHunks()
@@ -297,140 +186,57 @@ sealed class HunkAdornmentManager
         var snapshot = _view.TextSnapshot;
         foreach (var t in _tracked)
         {
-            // Skip accepted hunks the user has typed into. The marker is
-            // suppressed locally until the next snapshot (which the host
-            // RPC will re-classify as open).
             if (t.LocallyInvalidated) continue;
-
             try
             {
                 var live = t.Span.GetSpan(snapshot);
-                if (string.Equals(t.Info.State, "accepted", StringComparison.Ordinal))
-                    RenderAcceptedHunk(t.Info, live, snapshot);
-                else
-                    RenderOpenHunk(t.Info, live, snapshot);
+                RenderHighlight(t, live);
+                RenderButtons(t, live);
             }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"[ChatRelay.editor] Render hunk failed: {ex.Message}");
-            }
+            catch (Exception ex) { Debug.WriteLine($"[ChatRelay.editor] Render hunk failed: {ex.Message}"); }
         }
     }
 
-    // Accepted hunks render only as a thin turquoise marker bar in the
-    // left margin (no reject button — accepts are set in stone; the user
-    // reverts via the editor's own undo stack).
-    void RenderAcceptedHunk(HunkInfo h, SnapshotSpan span, ITextSnapshot snapshot)
+    // Pure-deletion hunks (CurrentCount=0) skip — the red strip from HunkRemovedLinesTagger represents them.
+    // Use TextTop/TextBottom so the highlight doesn't extend into reserved gap-space above the line.
+    void RenderHighlight(TrackedHunk t, SnapshotSpan span)
     {
-        if (_layer is null) return;
-        if (span.Length <= 0) return;
-
-        // Intersect-the-span (vs Get…ContainingBufferPosition) keeps the
-        // marker visible when the hunk is partially scrolled off-screen.
+        if (_layer is null || t.Info.CurrentCount == 0 || span.Length <= 0) return;
         var formatted = _view.TextViewLines.GetTextViewLinesIntersectingSpan(span);
         if (formatted is null || formatted.Count == 0) return;
         var firstView = formatted[0];
         var lastView = formatted[formatted.Count - 1];
 
-        var modelLabel = string.IsNullOrEmpty(h.Model)
-            ? "Edited by the model"
-            : $"Edited by {h.Model}";
-
-        // TextTop / TextBottom (the glyph band) rather than Top / Bottom
-        // — the latter includes any reserved top-space the
-        // InterLineAdornmentTagger has set above the line, and we don't
-        // want the marker bar to extend into that gap.
-        var bar = new Rectangle
+        var rect = new Rectangle
         {
-            Fill = AccentBrush,
-            Width = 3,
+            Fill = HighlightFill,
+            IsHitTestVisible = false,
+            Width = _view.ViewportWidth,
             Height = lastView.TextBottom - firstView.TextTop,
-            ToolTip = modelLabel,
-            Cursor = System.Windows.Input.Cursors.Help,
         };
-        Canvas.SetLeft(bar, _view.ViewportLeft + 1);
-        Canvas.SetTop(bar, firstView.TextTop);
-        _layer.AddAdornment(
-            AdornmentPositioningBehavior.OwnerControlled,
-            span, AdornmentTagFor(h, "accepted-bar"), bar, null);
+        Canvas.SetLeft(rect, _view.ViewportLeft);
+        Canvas.SetTop(rect, firstView.TextTop);
+        _layer.AddAdornment(AdornmentPositioningBehavior.OwnerControlled, span, AdornmentTagFor(t.Info, "highlight"), rect, null);
     }
 
-    void RenderOpenHunk(HunkInfo h, SnapshotSpan span, ITextSnapshot snapshot)
+    // Anchors at the top of the hunk's first VISIBLE line so buttons stay reachable as the user scrolls a tall hunk.
+    void RenderButtons(TrackedHunk t, SnapshotSpan span)
     {
-        if (_layer is null) return;
+        if (_overlay is null) return;
+        var formatted = _view.TextViewLines.GetTextViewLinesIntersectingSpan(span);
+        if (formatted is null || formatted.Count == 0) return;
+        var firstView = formatted[0];
 
-        // Y to position the buttons row beneath whatever's visible.
-        double belowY;
-
-        if (span.Length > 0)
-        {
-            // Intersect-the-span keeps decorations visible when the hunk
-            // is partially scrolled off-screen — anchor to whichever
-            // lines ARE in the formatted view.
-            var formatted = _view.TextViewLines.GetTextViewLinesIntersectingSpan(span);
-            if (formatted is null || formatted.Count == 0) return;
-            var firstView = formatted[0];
-            var lastView = formatted[formatted.Count - 1];
-
-            // TextTop / TextBottom (the glyph band) rather than Top /
-            // Bottom — Top includes any reserved top-space VS allocated
-            // above the line for HunkRemovedLinesTagger's
-            // InterLineAdornmentTag. Stretching the highlight from Top
-            // would z-fight the red strip and hide the blue.
-            var rect = new Rectangle
-            {
-                Fill = HighlightFill,
-                IsHitTestVisible = false,
-                Width = _view.ViewportWidth,
-                Height = lastView.TextBottom - firstView.TextTop,
-            };
-            Canvas.SetLeft(rect, _view.ViewportLeft);
-            Canvas.SetTop(rect, firstView.TextTop);
-            _layer.AddAdornment(
-                AdornmentPositioningBehavior.OwnerControlled,
-                span, AdornmentTagFor(h, "highlight"), rect, null);
-            belowY = lastView.TextBottom;
-        }
-        else
-        {
-            // Pure deletion — anchor below the join-point line.
-            int lineNum = snapshot.GetLineNumberFromPosition(span.Start.Position);
-            if (lineNum >= snapshot.LineCount) return;
-            var line = snapshot.GetLineFromLineNumber(lineNum);
-            var formatted = _view.TextViewLines.GetTextViewLinesIntersectingSpan(
-                new SnapshotSpan(line.Start, line.LengthIncludingLineBreak));
-            if (formatted is null || formatted.Count == 0) return;
-            belowY = formatted[0].TextBottom;
-        }
-
-        var buttons = BuildButtonRow(h);
-        if (buttons is FrameworkElement fe)
-            fe.VerticalAlignment = VerticalAlignment.Top;
-
-        Canvas.SetLeft(buttons, _view.ViewportLeft + 4);
-        Canvas.SetTop(buttons, belowY + 2);
-        (_overlay ?? _layer).AddAdornment(
-            AdornmentPositioningBehavior.OwnerControlled,
-            new SnapshotSpan(span.Start, 0),
-            AdornmentTagFor(h, "buttons"), buttons, null);
+        var row = BuildButtonRow(t.Info);
+        row.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+        Canvas.SetLeft(row, _view.ViewportLeft + _view.ViewportWidth - row.DesiredSize.Width - 8);
+        Canvas.SetTop(row, firstView.TextTop);
+        _overlay.AddAdornment(AdornmentPositioningBehavior.OwnerControlled, span, AdornmentTagFor(t.Info, "buttons"), row, null);
     }
 
-    // Square 24×24 buttons sized to match the Expander header chrome
-    // (FontSize 11 + Padding (6,2,6,2) + ~border ≈ 24px tall) so the
-    // accept/reject row lines up perfectly with the "{N} removed lines"
-    // header. 6px gap between the two buttons.
-    const double SmallButtonWidth = 24;
-    const double SmallButtonHeight = 24;
-    const double SmallButtonGap = 6;
-    const double OpenButtonRowWidth = SmallButtonWidth * 2 + SmallButtonGap;
-
-    UIElement BuildButtonRow(HunkInfo h)
+    StackPanel BuildButtonRow(HunkInfo h)
     {
-        var row = new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            HorizontalAlignment = HorizontalAlignment.Right,
-        };
+        var row = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
 
         var accept = BuildIconButton("✓", primary: true);
         accept.ToolTip = "Accept this change";
@@ -439,7 +245,7 @@ sealed class HunkAdornmentManager
 
         var reject = BuildIconButton("↶", primary: false);
         reject.ToolTip = "Revert this change";
-        reject.Margin = new Thickness(SmallButtonGap, 0, 0, 0);
+        reject.Margin = new Thickness(ButtonGap, 0, 0, 0);
         reject.Click += async (_, _) => await OnRejectClicked(h);
         row.Children.Add(reject);
 
@@ -466,46 +272,20 @@ sealed class HunkAdornmentManager
         catch (Exception ex) { Debug.WriteLine($"[ChatRelay.editor] RejectHunk failed: {ex.Message}"); }
     }
 
-    /// <summary>
-    /// Persists the buffer to disk before accept/reject runs on the host.
-    /// Two reasons:
-    ///   • Without this, the host writes <c>Baseline</c> back over a file
-    ///     the editor still has dirty in-memory; VS prompts the user with
-    ///     "the file was modified externally — reload?" — annoying every
-    ///     time they hit ↶.
-    ///   • Saves the user's in-buffer typing into <c>LastApplied</c> so
-    ///     reject covers their edits along with the model's, and a
-    ///     subsequent redo restores the user's lines too.
-    /// No-op if the buffer isn't dirty or there's no <c>ITextDocument</c>
-    /// (transient buffers, peek windows, etc.).
-    /// </summary>
+    // Without this, the host writes Baseline over a dirty buffer and VS prompts "modified externally — reload?" on every reject.
     void TrySaveBuffer()
     {
         try
         {
-            if (_view.TextBuffer.Properties.TryGetProperty<ITextDocument>(typeof(ITextDocument), out var doc)
-                && doc.IsDirty)
-            {
+            if (_view.TextBuffer.Properties.TryGetProperty<ITextDocument>(typeof(ITextDocument), out var doc) && doc.IsDirty)
                 doc.Save();
-            }
         }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"[ChatRelay.editor] save-before-action failed: {ex.Message}");
-        }
+        catch (Exception ex) { Debug.WriteLine($"[ChatRelay.editor] save-before-action failed: {ex.Message}"); }
     }
-
-    // Two cached ControlTemplates — primary (turquoise) for accept, neutral
-    // for reject. Building the FrameworkElementFactory + Triggers on every
-    // RenderHunks pass was a non-trivial WPF allocation; share once.
-    static readonly Brush PrimaryBorderBrush = Frozen(new SolidColorBrush(Color.FromRgb(0x2E, 0xB6, 0xAB)));
-    static readonly ControlTemplate PrimaryTemplate = BuildButtonTemplate(primary: true);
-    static readonly ControlTemplate SecondaryTemplate = BuildButtonTemplate(primary: false);
 
     static ControlTemplate BuildButtonTemplate(bool primary)
     {
-        var border = new FrameworkElementFactory(typeof(Border));
-        border.Name = "Bd";
+        var border = new FrameworkElementFactory(typeof(Border)) { Name = "Bd" };
         border.SetValue(Border.CornerRadiusProperty, new CornerRadius(3));
         border.SetValue(Border.BorderThicknessProperty, new Thickness(1));
         border.SetBinding(Border.BackgroundProperty,
@@ -519,30 +299,25 @@ sealed class HunkAdornmentManager
         border.AppendChild(content);
 
         var template = new ControlTemplate(typeof(Button)) { VisualTree = border };
-        var hoverTrigger = new Trigger { Property = UIElement.IsMouseOverProperty, Value = true };
-        hoverTrigger.Setters.Add(new Setter(Border.BackgroundProperty,
-            primary ? AccentBrushHover : (Brush?)Application.Current.TryFindResource(EnvironmentColors.CommandBarMouseOverBackgroundGradientBrushKey) ?? Brushes.LightGray,
-            "Bd"));
-        var pressTrigger = new Trigger { Property = System.Windows.Controls.Primitives.ButtonBase.IsPressedProperty, Value = true };
-        pressTrigger.Setters.Add(new Setter(Border.BackgroundProperty,
-            primary ? AccentBrushPressed : (Brush?)Application.Current.TryFindResource(EnvironmentColors.CommandBarSelectedBrushKey) ?? Brushes.Gray,
-            "Bd"));
-        template.Triggers.Add(hoverTrigger);
-        template.Triggers.Add(pressTrigger);
+        var hover = new Trigger { Property = UIElement.IsMouseOverProperty, Value = true };
+        hover.Setters.Add(new Setter(Border.BackgroundProperty,
+            primary ? AccentBrushHover : (Brush?)Application.Current.TryFindResource(EnvironmentColors.CommandBarMouseOverBackgroundGradientBrushKey) ?? Brushes.LightGray, "Bd"));
+        var press = new Trigger { Property = System.Windows.Controls.Primitives.ButtonBase.IsPressedProperty, Value = true };
+        press.Setters.Add(new Setter(Border.BackgroundProperty,
+            primary ? AccentBrushPressed : (Brush?)Application.Current.TryFindResource(EnvironmentColors.CommandBarSelectedBrushKey) ?? Brushes.Gray, "Bd"));
+        template.Triggers.Add(hover);
+        template.Triggers.Add(press);
         template.Seal();
         return template;
     }
 
-    // 24×24 icon-only buttons — accept gets the brand turquoise, reject
-    // gets a theme-bound neutral surface. Custom ControlTemplate so WPF's
-    // default hover/pressed gradients don't override our colors.
     static Button BuildIconButton(string glyph, bool primary)
     {
         var btn = new Button
         {
             Content = glyph,
-            Width = SmallButtonWidth,
-            Height = SmallButtonHeight,
+            Width = ButtonSize,
+            Height = ButtonSize,
             FontSize = 13,
             Padding = new Thickness(0),
             Cursor = System.Windows.Input.Cursors.Hand,
@@ -550,7 +325,6 @@ sealed class HunkAdornmentManager
             VerticalContentAlignment = VerticalAlignment.Center,
             Template = primary ? PrimaryTemplate : SecondaryTemplate,
         };
-
         if (primary)
         {
             btn.Background = AccentBrush;
@@ -566,9 +340,7 @@ sealed class HunkAdornmentManager
         return btn;
     }
 
-    // Identifies an adornment so the layer can match it on removal.
-    static object AdornmentTagFor(HunkInfo h, string role) =>
-        $"{h.BaselineStart}:{h.BaselineCount}:{role}";
+    static object AdornmentTagFor(HunkInfo h, string role) => $"{h.BaselineStart}:{h.BaselineCount}:{role}";
 
     static Brush Frozen(SolidColorBrush b) { b.Freeze(); return b; }
 
@@ -578,13 +350,6 @@ sealed class HunkAdornmentManager
         _view.Closed -= OnViewClosed;
         _view.LayoutChanged -= OnLayoutChanged;
         _view.TextBuffer.Changed -= OnBufferChanged;
-    }
-
-    static string? ResolveFilePath(IWpfTextView view)
-    {
-        if (view.TextBuffer.Properties.TryGetProperty<ITextDocument>(typeof(ITextDocument), out var doc))
-            return doc.FilePath;
-        return null;
+        if (_doc is not null) _doc.FileActionOccurred -= OnFileActionOccurred;
     }
 }
-
