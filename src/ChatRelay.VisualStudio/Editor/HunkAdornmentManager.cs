@@ -328,26 +328,31 @@ sealed class HunkAdornmentManager
         // hunk back into the change list themselves.
         if (span.Length <= 0) return;
 
-        var firstView = _view.TextViewLines.GetTextViewLineContainingBufferPosition(span.Start);
-        // span.End-1 keeps us on the last actual line, not the next one.
-        var lastPos = span.End > span.Start ? span.End - 1 : span.End;
-        var lastView = _view.TextViewLines.GetTextViewLineContainingBufferPosition(lastPos);
-        if (firstView is null || lastView is null) return;
+        // GetTextViewLinesIntersectingSpan keeps the marker visible when
+        // the user has scrolled so part of the hunk is off-screen — we
+        // anchor to the visible portion instead of bailing.
+        var formatted = _view.TextViewLines.GetTextViewLinesIntersectingSpan(span);
+        if (formatted is null || formatted.Count == 0) return;
+        var firstView = formatted[0];
+        var lastView = formatted[formatted.Count - 1];
 
         var modelLabel = string.IsNullOrEmpty(h.Model)
             ? "Edited by the model"
             : $"Edited by {h.Model}";
 
+        // TextTop / TextBottom — see RenderOpenHunk for why. Using Top
+        // would stretch the marker bar into any reserved gap above the
+        // first line and overlap an InterLineAdornment-provided gap.
         var bar = new Rectangle
         {
             Fill = AccentBrush,
             Width = 3,
-            Height = lastView.Bottom - firstView.Top,
+            Height = lastView.TextBottom - firstView.TextTop,
             ToolTip = modelLabel,
             Cursor = System.Windows.Input.Cursors.Help,
         };
         Canvas.SetLeft(bar, _view.ViewportLeft + 1);
-        Canvas.SetTop(bar, firstView.Top);
+        Canvas.SetTop(bar, firstView.TextTop);
         _layer.AddAdornment(
             AdornmentPositioningBehavior.OwnerControlled,
             span, AdornmentTagFor(h, "accepted-bar"), bar, null);
@@ -362,41 +367,59 @@ sealed class HunkAdornmentManager
 
         if (span.Length > 0)
         {
-            // Live span from the tracking-span gives us the user's
-            // typed-into region too, so the highlight grows immediately
-            // — no save required.
-            var firstView = _view.TextViewLines.GetTextViewLineContainingBufferPosition(span.Start);
-            var lastPos = span.End > span.Start ? span.End - 1 : span.End;
-            var lastView = _view.TextViewLines.GetTextViewLineContainingBufferPosition(lastPos);
-            if (firstView is not null && lastView is not null)
+            // GetTextViewLinesIntersectingSpan returns only the formatted
+            // lines that overlap the hunk's span — including the case
+            // where the hunk extends past the viewport in either
+            // direction. We then anchor the highlight + buttons to the
+            // visible portion. Using GetTextViewLineContainingBufferPosition
+            // returns null when the exact buffer position isn't in any
+            // formatted line (off-screen by even one pixel), which used
+            // to make the entire hunk's UI disappear during scrolling.
+            var formatted = _view.TextViewLines.GetTextViewLinesIntersectingSpan(span);
+            if (formatted is null || formatted.Count == 0) return;
+
+            var firstView = formatted[0];
+            var lastView = formatted[formatted.Count - 1];
+
+            // TextTop / TextBottom (the actual glyph band) rather than
+            // Top / Bottom (which include any reserved top/bottom-space —
+            // e.g. the gap VS reserves above this line for the
+            // HunkRemovedLinesTagger's InterLineAdornmentTag). Painting
+            // from Top would stretch the highlight up into the reserved
+            // gap and z-fight with the red removed-lines block, hiding
+            // the blue completely.
+            var rect = new Rectangle
             {
-                var rect = new Rectangle
-                {
-                    Fill = HighlightFill,
-                    IsHitTestVisible = false,    // text below stays interactive
-                    Width = _view.ViewportWidth,
-                    Height = lastView.Bottom - firstView.Top,
-                };
-                Canvas.SetLeft(rect, _view.ViewportLeft);
-                Canvas.SetTop(rect, firstView.Top);
-                _layer.AddAdornment(
-                    AdornmentPositioningBehavior.OwnerControlled,
-                    span, AdornmentTagFor(h, "highlight"), rect, null);
-                belowY = lastView.Bottom;
-            }
-            else
-            {
-                // Lines aren't currently formatted — skip rendering this hunk
-                // entirely until the next layout pass when they're in view.
-                return;
-            }
+                Fill = HighlightFill,
+                IsHitTestVisible = false,    // text below stays interactive
+                Width = _view.ViewportWidth,
+                Height = lastView.TextBottom - firstView.TextTop,
+            };
+            Canvas.SetLeft(rect, _view.ViewportLeft);
+            Canvas.SetTop(rect, firstView.TextTop);
+            _layer.AddAdornment(
+                AdornmentPositioningBehavior.OwnerControlled,
+                span, AdornmentTagFor(h, "highlight"), rect, null);
+            // Buttons go just below the last visible line's text — if the
+            // hunk's actual last line is off-screen below the viewport,
+            // lastView is the last visible line and buttons end up just
+            // above the bottom edge instead of clipping out entirely.
+            belowY = lastView.TextBottom;
         }
         else
         {
-            // Pure deletion: anchor the panel at the join-point line.
-            var view = _view.TextViewLines.GetTextViewLineContainingBufferPosition(span.Start);
-            if (view is null) return;
-            belowY = view.Top;
+            // Pure deletion: anchor the buttons just below the join-point
+            // line's text. The red block sits in the reserved top-space
+            // ABOVE this line; the buttons go BELOW so they don't collide.
+            // Use a span over the entire join-point line so partial-
+            // viewport scrolling still surfaces the buttons.
+            int lineNum = snapshot.GetLineNumberFromPosition(span.Start.Position);
+            if (lineNum >= snapshot.LineCount) return;
+            var line = snapshot.GetLineFromLineNumber(lineNum);
+            var formatted = _view.TextViewLines.GetTextViewLinesIntersectingSpan(
+                new SnapshotSpan(line.Start, line.LengthIncludingLineBreak));
+            if (formatted is null || formatted.Count == 0) return;
+            belowY = formatted[0].TextBottom;
         }
 
         var anchorSpan = new SnapshotSpan(span.Start, 0);

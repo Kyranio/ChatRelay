@@ -56,11 +56,18 @@ internal sealed class HunkRemovedLinesTagger : ITagger<InterLineAdornmentTag>
     static readonly Brush RemovedFill = Frozen(new SolidColorBrush(Color.FromArgb(0x40, 0xE0, 0x40, 0x40)));
     static readonly Brush RemovedText = Frozen(new SolidColorBrush(Color.FromRgb(0xCB, 0x6E, 0x6E)));
 
-    // Vertical breathing room around the inline block's text — the tag
-    // reserves (lineHeight × N) + 2×padding pixels, the inner content
-    // is centred via TextBox padding so the red strip has a small gap
-    // above and below the actual lines.
+    // Vertical breathing room around the inline block's text.
     const double VerticalPadding = 2;
+
+    // Per-line height used when reserving InterLineAdornmentTag space.
+    // The editor's IWpfTextView.LineHeight reports the EDITOR's per-line
+    // pixel height, but our adornment is a WPF TextBox using FontSize 12
+    // which renders at ~16px/line regardless. Reserving editor-line-height
+    // pixels leaves the TextBox short on space and only the first line
+    // of multi-line content is visible — the rest gets clipped inside
+    // the reserved gap. Reserve at least this many pixels per line so
+    // the WPF rendering always fits.
+    const double MinLineHeight = 18;
 
     readonly IWpfTextView _view;
     readonly EditorChangesService _service;
@@ -86,7 +93,11 @@ internal sealed class HunkRemovedLinesTagger : ITagger<InterLineAdornmentTag>
         if (hunks.Count == 0) yield break;
 
         var snapshot = spans[0].Snapshot;
-        var lineHeight = _view.LineHeight > 0 ? _view.LineHeight : 16;
+        // Use whichever is taller: the editor's reported line height or
+        // our floor for WPF TextBox rendering. Otherwise multi-line
+        // removed-blocks clip everything past line 1.
+        var editorLineHeight = _view.LineHeight > 0 ? _view.LineHeight : 16;
+        var lineHeight = Math.Max(editorLineHeight, MinLineHeight);
 
         foreach (var h in hunks)
         {
