@@ -105,3 +105,10 @@ Project / global config files are **`.chatrelay.mcp.json`**, deliberately distin
 - 3-part semver, pre-1.0 until protocol & VS extension stable
 - dedicated release/v<version> PRs; fold [Unreleased] per Keep a Changelog
 - never bump version in feature PRs
+
+## Documentation
+- `README.md` for marketing-facing product docs
+- `docs/ARCHITECTURE.md` for internal design docs
+- `docs/PROTOCOL.md` for JSON-RPC contract
+- `docs/DEVELOPMENT.md` for build & test instructions
+- `docs/CONTRIBUTE.md` for contribution guidelines

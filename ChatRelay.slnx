@@ -1,13 +1,4 @@
 <Solution>
-  <Folder Name="/Solution Items/">
-    <File Path=".gitignore" />
-    <File Path="ARCHITECTURE.md" />
-    <File Path="CHANGELOG.md" />
-    <File Path="CLAUDE.md" />
-    <File Path="LICENSE" />
-    <File Path="PROTOCOL.md" />
-    <File Path="README.md" />
-  </Folder>
   <Project Path="src/ChatRelay.Adapter.ClaudeApi/ChatRelay.Adapter.ClaudeApi.csproj" />
   <Project Path="src/ChatRelay.Adapter.ClaudeCli/ChatRelay.Adapter.ClaudeCli.csproj" />
   <Project Path="src/ChatRelay.Adapter.Ollama/ChatRelay.Adapter.Ollama.csproj" />
