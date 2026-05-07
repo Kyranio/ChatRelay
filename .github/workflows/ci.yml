@@ -27,9 +27,13 @@ jobs:
 
       - name: Restore + build (Release)
         shell: pwsh
+        # DeployExtension=false skips the experimental-hive deploy. The runner has VS 2022
+        # but our VSIX targets VS 2026 (Microsoft.VisualStudio.Utilities 18.0.0.0), so the
+        # deploy step would fail with VSSDK1077. F5 deploys locally still work — csproj
+        # default stays True.
         run: |
           MSBuild.exe ChatRelay.slnx /t:Restore /p:Configuration=Release /v:minimal
-          MSBuild.exe ChatRelay.slnx /t:Rebuild  /p:Configuration=Release /v:minimal
+          MSBuild.exe ChatRelay.slnx /t:Rebuild  /p:Configuration=Release /v:minimal /p:DeployExtension=false
 
       - name: Integration tests
         shell: pwsh
