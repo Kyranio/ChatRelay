@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011" xmlns:d="http://schemas.microsoft.com/developer/vsx-schema-design/2011">
   <Metadata>
-    <Identity Id="kyranio.ChatRelay.369e56a8-26fe-4ab2-af02-84e6ad20eb51" Version="0.1.1" Language="en-US" Publisher="kyranio" />
+    <Identity Id="kyranio.ChatRelay.369e56a8-26fe-4ab2-af02-84e6ad20eb51" Version="0.1.2" Language="en-US" Publisher="kyranio" />
     <DisplayName>ChatRelay for Visual Studio</DisplayName>
     <Description xml:space="preserve">Chat with Claude inside Visual Studio — and any other AI backend you have installed. ChatRelay auto-detects Claude CLI (subscription login), the Anthropic API, and local Ollama, then groups every available model under one dropdown in a dockable tool window. Right-click any editor selection or Solution Explorer file to pin it as a reference in the next message. Configure MCP servers globally or per-solution — tools work across every backend.</Description>
     <License>LICENSE</License>

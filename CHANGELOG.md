@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-05-08
+
+Inline change tracking. Every model edit now lights up directly in the
+editor with per-hunk accept / reject buttons, a turquoise highlight on
+added lines, and a red strip showing what was removed. The chat-side
+changelist persists per-file totals (open + accepted) for the lifetime
+of the VS session.
+
+### Added
+- **In-editor adornments** for model edits — turquoise highlight on
+  open hunks, full-width red strip above for removed lines (with
+  baseline line numbers in a sibling margin), and a per-hunk
+  accept (✓) / reject (↶) button row.
+- **Per-hunk accept / reject** alongside the existing per-file flow.
+  Accept folds the hunk into Baseline immediately so future diffs and
+  Deny revert to that point — not the pre-accept original.
+- **CSS-sticky button positioning** — buttons anchor at the hunk's
+  visual top, clamp to the viewport top with a small margin as the
+  hunk scrolls past, then ride the hunk's bottom off-screen.
+- **Per-file accepted counters** in the changelist (volatile, in-memory)
+  shown next to the filename so totals stay visible after every change
+  is accepted. Session-level rollup in the header strip.
+- **Resizable changelist** — capped at ~5 file rows by default with a
+  drag-handle above to grow / shrink.
+- **DiffPlex line diff** with content-aware coalescing: matched runs
+  of whitespace and structural punctuation merge so a model edit shows
+  as one logical hunk; substantive code splits.
+
+### Wire (Contracts)
+- `ChangeProposal` adds `AcceptedLinesAdded` / `AcceptedLinesRemoved`
+  (defaulted, backward-compatible).
+- `SessionChangesSnapshot` adds session-level
+  `AcceptedLinesAdded` / `AcceptedLinesRemoved`.
+
+### Fixed
+- **Deny-after-accept regression** — `Deny` on a follow-up change used
+  to revert the file to the pre-accept original because Baseline
+  wasn't advanced on accept. Now accepts fold into Baseline so Deny
+  reverts to the last accepted truth.
+- **Adornments survive a host write that reloads the buffer.** Tracking
+  spans built before VS finishes its `ContentLoadedFromDisk` cycle no
+  longer collapse and orphan the highlight; the manager defers when
+  the buffer hasn't caught up and rebuilds when the reload completes.
+- **Buttons stay focus-stable.** Moved from `ISpaceReservationAgent`
+  popups (which lose focus when the editor gets focus) to WPF
+  adornments on a layer above Text.
+- **Test-run config mismatch** — `HostFixture` now derives the host
+  DLL path from the same build config the tests are running under,
+  so a Debug rebuild + `dotnet test -c Release` doesn't silently
+  load the wrong DLL.
+
+### CI
+- Build + integration tests run on every PR into `dev` or `master`.
+- CI rebuild passes `DeployExtension=false` so the VS 2022 runner
+  can build a VS 2026-targeted VSIX without trying to deploy to a
+  non-existent experimental hive.
+
+### Tooling
+- DiffPlex 1.9.0 added as a project reference in `ChatRelay.Changes`.
+
 ## [0.1.1] — 2026-05-01
 
 First versioned release with shipped artifact. Folds in everything
@@ -237,6 +297,7 @@ Initial public release.
   results baked in, but the intermediate tool uses are not
   shown as bubbles.
 
-[Unreleased]: https://github.com/Kyranio/ChatRelay/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/Kyranio/ChatRelay/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/Kyranio/ChatRelay/releases/tag/v0.1.2
 [0.1.1]: https://github.com/Kyranio/ChatRelay/releases/tag/v0.1.1
 [0.1.0]: https://github.com/Kyranio/ChatRelay/releases/tag/v0.1.0
