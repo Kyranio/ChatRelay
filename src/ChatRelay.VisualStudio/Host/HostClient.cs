@@ -24,6 +24,7 @@ public sealed class HostClient : IDisposable
     public event Action<McpServerSummary>? McpServerChanged;
     public event Action? AdaptersChanged;
     public event Action? ModelsChanged;
+    public event Action<SessionChangesSnapshot>? ChangesUpdated;
 
     public static HostClient Start()
     {
@@ -58,6 +59,7 @@ public sealed class HostClient : IDisposable
         _rpc.AddLocalRpcMethod("onMcpServerChanged", new Action<McpServerSummary>(p => McpServerChanged?.Invoke(p)));
         _rpc.AddLocalRpcMethod("onAdaptersChanged", new Action(() => AdaptersChanged?.Invoke()));
         _rpc.AddLocalRpcMethod("onModelsChanged", new Action(() => ModelsChanged?.Invoke()));
+        _rpc.AddLocalRpcMethod("onChangesUpdated", new Action<ChangesUpdatedEvent>(p => ChangesUpdated?.Invoke(p.Snapshot)));
     }
 
     public Task<InitializeResult> InitializeAsync(string? workspacePath, CancellationToken ct = default) =>
@@ -119,6 +121,45 @@ public sealed class HostClient : IDisposable
 
     public Task RespondPermissionAsync(string requestId, string decision, bool remember) =>
         _rpc.InvokeWithParameterObjectAsync("respondPermission", new RespondPermissionParams(requestId, decision, remember));
+
+    // Change tracking ----------------------------------------------------
+    //
+    // Volatile, in-memory on the host. Snapshot fetched on demand;
+    // ChangesUpdated event fires the same shape after every state mutation
+    // so the view re-renders without a manual ListChangesAsync round-trip.
+
+    public Task<SessionChangesSnapshot> ListChangesAsync(string sessionId) =>
+        _rpc.InvokeWithParameterObjectAsync<SessionChangesSnapshot>("listChanges", new ListChangesParams(sessionId));
+
+    public Task AcceptChangeAsync(string sessionId, string filePath) =>
+        _rpc.InvokeWithParameterObjectAsync("acceptChange", new AcceptChangeParams(sessionId, filePath));
+
+    public Task DenyChangeAsync(string sessionId, string filePath) =>
+        _rpc.InvokeWithParameterObjectAsync("denyChange", new DenyChangeParams(sessionId, filePath));
+
+    public Task AcceptHunkAsync(string sessionId, string filePath, int baselineStart, int baselineCount) =>
+        _rpc.InvokeWithParameterObjectAsync("acceptHunk",
+            new AcceptHunkParams(sessionId, filePath, baselineStart, baselineCount));
+
+    public Task RejectHunkAsync(string sessionId, string filePath, int baselineStart, int baselineCount) =>
+        _rpc.InvokeWithParameterObjectAsync("rejectHunk",
+            new RejectHunkParams(sessionId, filePath, baselineStart, baselineCount));
+
+    public Task InvalidateAcceptedHunkAsync(string sessionId, string filePath, int baselineStart, int baselineCount) =>
+        _rpc.InvokeWithParameterObjectAsync("invalidateAcceptedHunk",
+            new InvalidateAcceptedHunkParams(sessionId, filePath, baselineStart, baselineCount));
+
+    public Task RedoDeniedChangeAsync(string sessionId, string filePath, string denialId) =>
+        _rpc.InvokeWithParameterObjectAsync("redoDeniedChange", new RedoDeniedChangeParams(sessionId, filePath, denialId));
+
+    public Task AcceptAllOpenChangesAsync(string sessionId) =>
+        _rpc.InvokeWithParameterObjectAsync("acceptAllOpenChanges", new BulkChangesParams(sessionId));
+
+    public Task DenyAllOpenChangesAsync(string sessionId) =>
+        _rpc.InvokeWithParameterObjectAsync("denyAllOpenChanges", new BulkChangesParams(sessionId));
+
+    public Task<int> CountOpenChangesAsync(string sessionId) =>
+        _rpc.InvokeWithParameterObjectAsync<int>("countOpenChanges", new BulkChangesParams(sessionId));
 
     public async Task ShutdownAsync()
     {

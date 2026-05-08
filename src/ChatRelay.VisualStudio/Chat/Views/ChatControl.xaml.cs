@@ -6,6 +6,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Data;
 using System.Windows.Documents;
 using System.Windows.Input;
@@ -77,6 +78,8 @@ public partial class ChatControl : UserControl
         ModelBox.ItemsSource = modelsView;
 
         _vm.References.CollectionChanged += OnReferencesChanged;
+        _vm.Proposals.CollectionChanged += OnProposalsChanged;
+        _vm.Denials.CollectionChanged += OnDenialsChanged;
         // Re-pick the model selector when the model list changes (initial
         // populate, or Ollama coming online later, etc.) so we don't sit
         // with an empty dropdown.
@@ -108,6 +111,7 @@ public partial class ChatControl : UserControl
         _vm.ErrorOccurred += AppendErrorBubble;
         _vm.PermissionRequested += AppendPermissionBubble;
         _vm.SessionsLoaded += OnVmSessionsLoaded;
+        _vm.ProposalsBecameNonEmpty += OnVmProposalsBecameNonEmpty;
         _vm.PropertyChanged += OnVmPropertyChanged;
     }
 
@@ -142,7 +146,27 @@ public partial class ChatControl : UserControl
                 DeleteSessionButton.IsEnabled = enabled;
                 SendButton.IsEnabled = enabled;
                 break;
+            case nameof(ChatViewModel.OpenLinesAdded):
+            case nameof(ChatViewModel.OpenLinesRemoved):
+            case nameof(ChatViewModel.AcceptedLinesAdded):
+            case nameof(ChatViewModel.AcceptedLinesRemoved):
+                UpdateChangesHeader();
+                break;
         }
+    }
+
+    void UpdateChangesHeader()
+    {
+        var sb = new System.Text.StringBuilder();
+        if (_vm.OpenLinesAdded > 0 || _vm.OpenLinesRemoved > 0)
+            sb.Append($"open +{_vm.OpenLinesAdded} −{_vm.OpenLinesRemoved}");
+        if (_vm.AcceptedLinesAdded > 0 || _vm.AcceptedLinesRemoved > 0)
+        {
+            if (sb.Length > 0) sb.Append("  ·  ");
+            sb.Append($"accepted +{_vm.AcceptedLinesAdded} −{_vm.AcceptedLinesRemoved}");
+        }
+        ChangesHeaderCounters.Text = sb.ToString();
+        ChangesHeader.Visibility = sb.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     async Task StartHostAsync()
@@ -167,6 +191,7 @@ public partial class ChatControl : UserControl
             host.PermissionRequest += p => UiThread.OnUi(() => _vm.OnPermissionRequest(p));
             host.AdaptersChanged   += () => UiThread.OnUi(() => _ = _vm.RefreshModelsAsync());
             host.ModelsChanged     += () => UiThread.OnUi(() => _ = _vm.RefreshModelsAsync());
+            host.ChangesUpdated    += s  => UiThread.OnUi(() => _vm.OnChangesUpdated(s));
 
             // Show the home screen and drop the loading overlay now —
             // models are loaded, host is responsive, the chat is usable.
@@ -1108,5 +1133,242 @@ public partial class ChatControl : UserControl
     void SetStatus(string text) => UsageStatusBar.Text = text;
 
     static Brush Frozen(Color c) { var b = new SolidColorBrush(c); b.Freeze(); return b; }
+
+    // ---- Changes list rendering ------------------------------------------
+
+    void OnProposalsChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        switch (e.Action)
+        {
+            case NotifyCollectionChangedAction.Add when e.NewItems is not null:
+                for (int i = 0; i < e.NewItems.Count; i++)
+                    ChangesList.Children.Insert(e.NewStartingIndex + i,
+                        BuildProposalRow((ChangeItem)e.NewItems[i]!));
+                break;
+            case NotifyCollectionChangedAction.Remove when e.OldItems is not null:
+                for (int i = 0; i < e.OldItems.Count; i++)
+                    if (e.OldStartingIndex < ChangesList.Children.Count)
+                        ChangesList.Children.RemoveAt(e.OldStartingIndex);
+                break;
+            case NotifyCollectionChangedAction.Reset:
+                ChangesList.Children.Clear();
+                break;
+        }
+        ChangesContainer.Visibility = _vm.Proposals.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    void OnDenialsChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        switch (e.Action)
+        {
+            case NotifyCollectionChangedAction.Add when e.NewItems is not null:
+                for (int i = 0; i < e.NewItems.Count; i++)
+                    DenialsList.Children.Insert(e.NewStartingIndex + i,
+                        BuildDenialRow((DenialItem)e.NewItems[i]!));
+                break;
+            case NotifyCollectionChangedAction.Remove when e.OldItems is not null:
+                for (int i = 0; i < e.OldItems.Count; i++)
+                    if (e.OldStartingIndex < DenialsList.Children.Count)
+                        DenialsList.Children.RemoveAt(e.OldStartingIndex);
+                break;
+            case NotifyCollectionChangedAction.Reset:
+                DenialsList.Children.Clear();
+                break;
+        }
+        DenialsExpander.Visibility = _vm.Denials.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    // Auto-expand on first incoming change. The "expand" here is just the
+    // fact that the section becomes visible when Proposals goes 0 → 1+;
+    // OnProposalsChanged does that already, so this handler is reserved
+    // for future bookkeeping (telemetry, focus stealing, etc.). Currently
+    // a no-op but kept wired so the spec contract holds explicitly.
+    void OnVmProposalsBecameNonEmpty()
+    {
+        ChangesContainer.Visibility = Visibility.Visible;
+    }
+
+    FrameworkElement BuildProposalRow(ChangeItem item)
+    {
+        var content = new StackPanel { Orientation = Orientation.Horizontal };
+        var border = new Border
+        {
+            CornerRadius = new CornerRadius(3),
+            Padding = new Thickness(4, 2, 4, 2),
+            Margin = new Thickness(0, 1, 0, 1),
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            Child = content,
+        };
+        border.SetResourceReference(Border.BackgroundProperty, EnvironmentColors.CommandBarSelectedBrushKey);
+
+        RebuildProposalContent(content, item);
+
+        // Per-row INPC: re-render when LinesAdded / LinesRemoved / State
+        // change in place (a follow-on edit to the same file fires those
+        // setters from ApplySnapshot).
+        PropertyChangedEventHandler handler = (_, _) => RebuildProposalContent(content, item);
+        item.PropertyChanged += handler;
+        border.Unloaded += (_, _) => item.PropertyChanged -= handler;
+        return border;
+    }
+
+    void RebuildProposalContent(StackPanel content, ChangeItem item)
+    {
+        content.Children.Clear();
+
+        // Both buttons hide once everything's accepted — nothing left to accept or undo on this file.
+        var accept = new Button
+        {
+            Content = "✓",
+            ToolTip = "Accept this change",
+            Style = (Style)FindResource("ChangeRowButtonStyle"),
+            Visibility = item.HasOpenChanges ? Visibility.Visible : Visibility.Collapsed,
+        };
+        accept.Click += async (_, _) => await _vm.AcceptChangeAsync(item);
+        var undo = new Button
+        {
+            Content = "↶",
+            ToolTip = "Undo this change",
+            Style = (Style)FindResource("ChangeRowButtonStyle"),
+            Visibility = item.HasOpenChanges ? Visibility.Visible : Visibility.Collapsed,
+        };
+        undo.Click += async (_, _) => await _vm.DenyChangeAsync(item);
+
+        content.Children.Add(accept);
+        content.Children.Add(undo);
+
+        var path = new TextBlock
+        {
+            Text = item.FilePath,
+            FontFamily = new FontFamily("Consolas"),
+            FontSize = 11,
+            FontWeight = FontWeights.Bold,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            MaxWidth = 250,
+            Cursor = Cursors.Hand,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(4, 0, 6, 0),
+        };
+        path.SetResourceReference(TextBlock.ForegroundProperty, EnvironmentColors.ToolWindowTextBrushKey);
+        path.MouseLeftButtonUp += (_, e) =>
+        {
+            Editor.EditorSelectionService.Navigate(item.AbsolutePath, 0, 0);
+            e.Handled = true;
+        };
+        content.Children.Add(path);
+
+        // Open diff (bright) followed by accepted history (dimmed) so the row always shows totals.
+        AddCount(content, item.LinesAdded, "+", Frozen(Color.FromRgb(0x2E, 0xCC, 0x71)), 1.0);
+        AddCount(content, item.LinesRemoved, "−", Frozen(Color.FromRgb(0xC0, 0x39, 0x2B)), 1.0);
+        AddCount(content, item.AcceptedLinesAdded, "+", Frozen(Color.FromRgb(0x2E, 0xCC, 0x71)), 0.55);
+        AddCount(content, item.AcceptedLinesRemoved, "−", Frozen(Color.FromRgb(0xC0, 0x39, 0x2B)), 0.55);
+    }
+
+    // Drag up grows the list, drag down shrinks. Bounds keep at least one row visible and cap at the viewport.
+    void ChangesResizeThumb_DragDelta(object sender, DragDeltaEventArgs e)
+    {
+        const double minH = 22;
+        double maxH = Math.Max(minH, ActualHeight - 200);
+        double next = ChangesScroll.MaxHeight - e.VerticalChange;
+        ChangesScroll.MaxHeight = Math.Max(minH, Math.Min(maxH, next));
+    }
+
+    static void AddCount(StackPanel content, int n, string sign, Brush brush, double opacity)
+    {
+        if (n <= 0) return;
+        content.Children.Add(new TextBlock
+        {
+            Text = sign + n,
+            FontFamily = new FontFamily("Consolas"),
+            FontSize = 11,
+            Foreground = brush,
+            Opacity = opacity,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 4, 0),
+        });
+    }
+
+    FrameworkElement BuildDenialRow(DenialItem item)
+    {
+        var content = new StackPanel { Orientation = Orientation.Horizontal };
+        var border = new Border
+        {
+            CornerRadius = new CornerRadius(3),
+            Padding = new Thickness(4, 2, 4, 2),
+            Margin = new Thickness(0, 1, 0, 1),
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            Opacity = 0.65,                      // dim — these are removed
+            Child = content,
+        };
+        border.SetResourceReference(Border.BackgroundProperty, EnvironmentColors.CommandBarSelectedBrushKey);
+
+        RebuildDenialContent(content, item);
+        PropertyChangedEventHandler handler = (_, _) => RebuildDenialContent(content, item);
+        item.PropertyChanged += handler;
+        border.Unloaded += (_, _) => item.PropertyChanged -= handler;
+        return border;
+    }
+
+    void RebuildDenialContent(StackPanel content, DenialItem item)
+    {
+        content.Children.Clear();
+
+        // Redo (↷) hidden once the file's drifted since the deny (CanRedo == false).
+        var redo = new Button
+        {
+            Content = "↷",
+            ToolTip = "Re-apply this change",
+            Style = (Style)FindResource("ChangeRowButtonStyle"),
+            Visibility = item.CanRedo ? Visibility.Visible : Visibility.Collapsed,
+        };
+        redo.Click += async (_, _) => await _vm.RedoDenialAsync(item);
+        content.Children.Add(redo);
+
+        var path = new TextBlock
+        {
+            Text = item.FilePath,
+            FontFamily = new FontFamily("Consolas"),
+            FontSize = 11,
+            FontWeight = FontWeights.Bold,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            MaxWidth = 250,
+            Cursor = Cursors.Hand,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(4, 0, 6, 0),
+        };
+        path.SetResourceReference(TextBlock.ForegroundProperty, EnvironmentColors.ToolWindowTextBrushKey);
+        path.MouseLeftButtonUp += (_, e) =>
+        {
+            Editor.EditorSelectionService.Navigate(item.AbsolutePath, 0, 0);
+            e.Handled = true;
+        };
+        content.Children.Add(path);
+
+        if (item.LinesAdded > 0)
+        {
+            var add = new TextBlock
+            {
+                Text = "+" + item.LinesAdded,
+                FontFamily = new FontFamily("Consolas"),
+                FontSize = 11,
+                Foreground = Frozen(Color.FromRgb(0x2E, 0xCC, 0x71)),
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 4, 0),
+            };
+            content.Children.Add(add);
+        }
+        if (item.LinesRemoved > 0)
+        {
+            var rem = new TextBlock
+            {
+                Text = "−" + item.LinesRemoved,
+                FontFamily = new FontFamily("Consolas"),
+                FontSize = 11,
+                Foreground = Frozen(Color.FromRgb(0xC0, 0x39, 0x2B)),
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+            content.Children.Add(rem);
+        }
+    }
 
 }

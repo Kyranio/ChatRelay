@@ -16,6 +16,15 @@
     <CopyBuildOutputToOutputDirectory>true</CopyBuildOutputToOutputDirectory>
     <CopyOutputSymbolsToOutputDirectory>false</CopyOutputSymbolsToOutputDirectory>
 
+    <!-- Auto-deploy the freshly-built VSIX into the Experimental Instance's
+         extension hive on every build. Combined with the launchSettings.json
+         "Experimental Instance" profile (devenv.exe /rootSuffix Exp), F5
+         becomes a one-step "build, deploy, launch with new extension"
+         workflow — no more manual setup.exe modify dance during dev.
+         The Marketplace-shipped VSIX in bin\Release\…\ChatRelay.vsix is
+         unaffected; this only writes into the per-user Exp hive. -->
+    <DeployExtension>True</DeployExtension>
+
     <!-- Threading analyzer noise that doesn't reflect real bugs in our usage:
          VSSDK007  false positive on FileAndForget pattern
          VSTHRD010 can't prove UI-thread call sites the analyzer doesn't trace
@@ -44,6 +53,23 @@
          source of truth shared with the host. The shell does NOT reference
          ChatRelay.Core — that's net10. Contracts is netstandard2.0. -->
     <ProjectReference Include="..\ChatRelay.Contracts\ChatRelay.Contracts.csproj" />
+
+    <!-- Build-order-only references on the two net10 self-contained exes
+         that ship inside the VSIX. The VSIX itself is net48 and cannot
+         link against net10 assemblies — ReferenceOutputAssembly=false
+         expresses exactly that, and SkipGetTargetFrameworkProperties=true
+         suppresses NuGet's cross-TFM compatibility check.
+         Without these refs, MSBuild's project graph schedules the VSIX
+         project in parallel with its real transitive deps (adapters,
+         Changes), and the BeforeBuild Publish targets below race against
+         those parallel compiles — producing intermittent CS0006 errors
+         on `obj/Debug/net10.0/ref/<dep>.dll` from missing ref assemblies. -->
+    <ProjectReference Include="..\ChatRelay.Host\ChatRelay.Host.csproj"
+                      ReferenceOutputAssembly="false"
+                      SkipGetTargetFrameworkProperties="true" />
+    <ProjectReference Include="..\ChatRelay.PermissionBroker\ChatRelay.PermissionBroker.csproj"
+                      ReferenceOutputAssembly="false"
+                      SkipGetTargetFrameworkProperties="true" />
   </ItemGroup>
 
   <ItemGroup>
