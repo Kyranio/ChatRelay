@@ -41,4 +41,30 @@ namespace ChatRelay.Backends
     {
         public string Message { get; set; } = string.Empty;
     }
+
+    /// <summary>
+    /// Adapters fire this whenever the model emits or completes a tool call.
+    /// The change tracker (host-side) is the primary consumer; future tool
+    /// log / audit features can subscribe alongside.
+    ///
+    /// <para>
+    /// <see cref="ToolCallPhase.Requested"/> fires when the model emits a
+    /// <c>tool_use</c> content block — file writes haven't happened yet, so
+    /// the tracker can snapshot the pre-write file content.
+    /// <see cref="ToolCallPhase.Completed"/> fires when the corresponding
+    /// <c>tool_result</c> arrives — the post-write state is now on disk.
+    /// </para>
+    /// </summary>
+    public class ToolCallObservedEvent : EventArgs
+    {
+        public string ToolName { get; set; } = string.Empty;
+        public string InputJson { get; set; } = string.Empty;
+        public ToolCallPhase Phase { get; set; }
+    }
+
+    public enum ToolCallPhase
+    {
+        Requested,
+        Completed,
+    }
 }

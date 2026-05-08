@@ -45,5 +45,13 @@ namespace ChatRelay.Backends
 
         event EventHandler<AiMessageEvent> MessageReceived;
         event EventHandler<AiErrorEvent> ErrorReceived;
+
+        /// <summary>
+        /// Fired whenever the model emits or completes a tool call. The
+        /// host's change tracker subscribes for file-mutating tools; other
+        /// future consumers (tool-call log, telemetry) hook in here too.
+        /// Adapters that don't run tools never fire this.
+        /// </summary>
+        event EventHandler<ToolCallObservedEvent> ToolCallObserved;
     }
 }

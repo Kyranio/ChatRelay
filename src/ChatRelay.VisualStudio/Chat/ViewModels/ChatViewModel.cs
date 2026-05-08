@@ -35,6 +35,28 @@ public sealed class ChatViewModel : INotifyPropertyChanged
     public ObservableCollection<AiModel> Models { get; } = new();
     public ObservableCollection<ReferenceItem> References { get; } = new();
 
+    /// <summary>
+    /// Open + accepted file-level change proposals for the current session.
+    /// Driven by <c>onChangesUpdated</c> notifications from the host.
+    /// Cleared on session switch / disposal.
+    /// </summary>
+    public ObservableCollection<ChangeItem> Proposals { get; } = new();
+
+    /// <summary>
+    /// Denied (undone) entries — one per (file, denial) pair. Surface in a
+    /// collapsible section under the proposals list; the section hides
+    /// itself when this collection is empty.
+    /// </summary>
+    public ObservableCollection<DenialItem> Denials { get; } = new();
+
+    int _openLinesAdded, _openLinesRemoved, _acceptedLinesAdded, _acceptedLinesRemoved;
+    /// <summary>Sum of LinesAdded across all currently-open proposals. Recomputed on every snapshot ingest.</summary>
+    public int OpenLinesAdded { get => _openLinesAdded; private set { if (_openLinesAdded != value) { _openLinesAdded = value; Raise(nameof(OpenLinesAdded)); } } }
+    public int OpenLinesRemoved { get => _openLinesRemoved; private set { if (_openLinesRemoved != value) { _openLinesRemoved = value; Raise(nameof(OpenLinesRemoved)); } } }
+    /// <summary>Cumulative lines accepted in this session, broadcast by the host. Volatile; cleared on session switch.</summary>
+    public int AcceptedLinesAdded { get => _acceptedLinesAdded; private set { if (_acceptedLinesAdded != value) { _acceptedLinesAdded = value; Raise(nameof(AcceptedLinesAdded)); } } }
+    public int AcceptedLinesRemoved { get => _acceptedLinesRemoved; private set { if (_acceptedLinesRemoved != value) { _acceptedLinesRemoved = value; Raise(nameof(AcceptedLinesRemoved)); } } }
+
     private ChatSession? _currentSession;
     public ChatSession? CurrentSession
     {
@@ -160,6 +182,13 @@ public sealed class ChatViewModel : INotifyPropertyChanged
     /// <summary>A permission request landed; view renders an inline approval bubble.</summary>
     public event Action<PermissionRequestEvent>? PermissionRequested;
 
+    /// <summary>
+    /// Fires after <see cref="Proposals"/> has just transitioned from empty
+    /// to non-empty. The view uses it to auto-expand the changes list on
+    /// the first incoming change, per the spec.
+    /// </summary>
+    public event Action? ProposalsBecameNonEmpty;
+
     // ---- Lifecycle ----------------------------------------------------
 
     /// <summary>Spawn the host process and run the initial workspace / model / session population.</summary>
@@ -173,6 +202,20 @@ public sealed class ChatViewModel : INotifyPropertyChanged
         await Host.InitializeAsync(initialWorkspace);
         await UiThread.SwitchToUi();
         await RefreshModelsAsync();
+
+        // Wire the editor adornment's accept/reject buttons to host RPCs
+        // via EditorChangesService. The MEF-instantiated editor managers
+        // don't share a constructor with this VM, so they reach into the
+        // service for the per-hunk round-trip rather than holding their
+        // own HostClient reference.
+        var svc = Editor.EditorChangesService.Current;
+        svc.AcceptHunkAsync = (sid, path, bs, bc) =>
+            Host?.AcceptHunkAsync(sid, path, bs, bc) ?? Task.CompletedTask;
+        svc.RejectHunkAsync = (sid, path, bs, bc) =>
+            Host?.RejectHunkAsync(sid, path, bs, bc) ?? Task.CompletedTask;
+        svc.InvalidateAcceptedHunkAsync = (sid, path, bs, bc) =>
+            Host?.InvalidateAcceptedHunkAsync(sid, path, bs, bc) ?? Task.CompletedTask;
+
         // Sessions are NOT loaded here — they happen in
         // LoadSessionsInBackgroundAsync after the view drops the loading
         // overlay. "Ready" = host alive + models populated + home shown.
@@ -313,6 +356,11 @@ public sealed class ChatViewModel : INotifyPropertyChanged
             picked.AdapterId = opened.AdapterId;
             picked.ModelId = opened.ModelId;
             SessionLoaded?.Invoke(opened);
+            // Re-pull change-tracker state for the new session — the host
+            // keeps separate per-session buckets, so switching from a
+            // session with proposals to one without (or vice versa) needs
+            // an explicit reload.
+            await RefreshChangesAsync();
         }
         catch (Exception ex) { ErrorOccurred?.Invoke(ex.Message); }
     }
@@ -331,6 +379,10 @@ public sealed class ChatViewModel : INotifyPropertyChanged
         }
         await UiThread.SwitchToUi();
         CurrentSession = null;
+        // Home state has no session; the changes lists belong to no one.
+        Proposals.Clear();
+        Denials.Clear();
+        OpenLinesAdded = OpenLinesRemoved = AcceptedLinesAdded = AcceptedLinesRemoved = 0;
         HomeStateEntered?.Invoke();
     }
 
@@ -524,6 +576,185 @@ public sealed class ChatViewModel : INotifyPropertyChanged
 
     public void OnError(string message) => ErrorOccurred?.Invoke(message);
     public void OnPermissionRequest(PermissionRequestEvent p) => PermissionRequested?.Invoke(p);
+
+    // ---- Change-tracking ingest ---------------------------------------
+
+    /// <summary>
+    /// Ingest a snapshot from <c>onChangesUpdated</c>. Snapshots not for
+    /// the active session are dropped (per-session collections; we'll re-
+    /// fetch on switch). In-place updates the existing items where possible
+    /// so the chips animate / blink instead of being recreated.
+    /// </summary>
+    public void OnChangesUpdated(SessionChangesSnapshot snapshot)
+    {
+        if (snapshot is null) return;
+        if (_currentSession is null || snapshot.SessionId != _currentSession.Id) return;
+        ApplySnapshot(snapshot);
+        // Fan out the same snapshot to editor-side consumers (Phase 4.2+).
+        // The editor MEF components subscribe to EditorChangesService and
+        // pick up per-file hunks from there, so they don't need their own
+        // RPC subscription. Chat-side and editor-side observe the same
+        // payload at the same time.
+        Editor.EditorChangesService.Current.Update(snapshot);
+    }
+
+    void ApplySnapshot(SessionChangesSnapshot snapshot)
+    {
+        var wasEmpty = Proposals.Count == 0;
+
+        // Proposals: in-place reconcile so existing rows keep their identity
+        // (and any per-row event subscriptions in the view) when only their
+        // counts / state changed. Drop rows missing from the new snapshot,
+        // update overlapping ones, append new ones.
+        var seen = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
+        foreach (var p in snapshot.Proposals)
+        {
+            seen.Add(p.AbsolutePath);
+            var existing = FindProposal(p.AbsolutePath);
+            if (existing is null)
+            {
+                Proposals.Add(new ChangeItem
+                {
+                    FilePath = p.FilePath,
+                    AbsolutePath = p.AbsolutePath,
+                    LinesAdded = p.LinesAdded,
+                    LinesRemoved = p.LinesRemoved,
+                    AcceptedLinesAdded = p.AcceptedLinesAdded,
+                    AcceptedLinesRemoved = p.AcceptedLinesRemoved,
+                });
+            }
+            else
+            {
+                existing.FilePath = p.FilePath;
+                existing.LinesAdded = p.LinesAdded;
+                existing.LinesRemoved = p.LinesRemoved;
+                existing.AcceptedLinesAdded = p.AcceptedLinesAdded;
+                existing.AcceptedLinesRemoved = p.AcceptedLinesRemoved;
+            }
+        }
+        for (int i = Proposals.Count - 1; i >= 0; i--)
+            if (!seen.Contains(Proposals[i].AbsolutePath))
+                Proposals.RemoveAt(i);
+
+        // Denials: simpler — flatten the per-file groups into one list,
+        // identity-keyed by Id (stable per denial). Same reconcile shape.
+        var seenDenials = new HashSet<string>(System.StringComparer.Ordinal);
+        foreach (var group in snapshot.Denials)
+        {
+            foreach (var d in group.Entries)
+            {
+                seenDenials.Add(d.Id);
+                var existing = FindDenial(d.Id);
+                if (existing is null)
+                {
+                    Denials.Add(new DenialItem
+                    {
+                        Id = d.Id,
+                        FilePath = group.FilePath,
+                        AbsolutePath = group.AbsolutePath,
+                        LinesAdded = d.LinesAdded,
+                        LinesRemoved = d.LinesRemoved,
+                        DeniedAt = d.DeniedAt,
+                        CanRedo = d.CanRedo,
+                    });
+                }
+                else
+                {
+                    existing.FilePath = group.FilePath;
+                    existing.AbsolutePath = group.AbsolutePath;
+                    existing.LinesAdded = d.LinesAdded;
+                    existing.LinesRemoved = d.LinesRemoved;
+                    existing.CanRedo = d.CanRedo;
+                }
+            }
+        }
+        for (int i = Denials.Count - 1; i >= 0; i--)
+            if (!seenDenials.Contains(Denials[i].Id))
+                Denials.RemoveAt(i);
+
+        int openAdded = 0, openRemoved = 0;
+        foreach (var p in Proposals) { openAdded += p.LinesAdded; openRemoved += p.LinesRemoved; }
+        OpenLinesAdded = openAdded;
+        OpenLinesRemoved = openRemoved;
+        AcceptedLinesAdded = snapshot.AcceptedLinesAdded;
+        AcceptedLinesRemoved = snapshot.AcceptedLinesRemoved;
+
+        if (wasEmpty && Proposals.Count > 0)
+            ProposalsBecameNonEmpty?.Invoke();
+    }
+
+    ChangeItem? FindProposal(string absolutePath)
+    {
+        foreach (var p in Proposals)
+            if (string.Equals(p.AbsolutePath, absolutePath, System.StringComparison.OrdinalIgnoreCase))
+                return p;
+        return null;
+    }
+
+    DenialItem? FindDenial(string id)
+    {
+        foreach (var d in Denials)
+            if (d.Id == id) return d;
+        return null;
+    }
+
+    /// <summary>
+    /// Refresh the proposal / denial collections for the just-loaded session.
+    /// Called by the view after every successful session switch so the lists
+    /// reflect the new session's changes (which the host already knows about
+    /// — sessions are independent on its side).
+    /// </summary>
+    public async Task RefreshChangesAsync()
+    {
+        if (Host is null || _currentSession is null)
+        {
+            Proposals.Clear();
+            Denials.Clear();
+            OpenLinesAdded = OpenLinesRemoved = AcceptedLinesAdded = AcceptedLinesRemoved = 0;
+            Editor.EditorChangesService.Current.ClearAll();
+            return;
+        }
+        try
+        {
+            var snap = await Host.ListChangesAsync(_currentSession.Id);
+            await UiThread.SwitchToUi();
+            ApplySnapshot(snap);
+            // Sync editor cache to the new session's snapshot — without
+            // this, switching sessions would leave stale hunks visible
+            // in the editor view for files no longer in the current
+            // session's tracker.
+            Editor.EditorChangesService.Current.Update(snap);
+        }
+        catch
+        {
+            await UiThread.SwitchToUi();
+            Proposals.Clear();
+            Denials.Clear();
+            OpenLinesAdded = OpenLinesRemoved = AcceptedLinesAdded = AcceptedLinesRemoved = 0;
+            Editor.EditorChangesService.Current.ClearAll();
+        }
+    }
+
+    public async Task AcceptChangeAsync(ChangeItem item)
+    {
+        if (Host is null || _currentSession is null) return;
+        try { await Host.AcceptChangeAsync(_currentSession.Id, item.AbsolutePath); }
+        catch (Exception ex) { ErrorOccurred?.Invoke(ex.Message); }
+    }
+
+    public async Task DenyChangeAsync(ChangeItem item)
+    {
+        if (Host is null || _currentSession is null) return;
+        try { await Host.DenyChangeAsync(_currentSession.Id, item.AbsolutePath); }
+        catch (Exception ex) { ErrorOccurred?.Invoke(ex.Message); }
+    }
+
+    public async Task RedoDenialAsync(DenialItem item)
+    {
+        if (Host is null || _currentSession is null) return;
+        try { await Host.RedoDeniedChangeAsync(_currentSession.Id, item.AbsolutePath, item.Id); }
+        catch (Exception ex) { ErrorOccurred?.Invoke(ex.Message); }
+    }
 
     // ---- Reference handling -------------------------------------------
 

@@ -2,6 +2,7 @@
   <Project Path="src/ChatRelay.Adapter.ClaudeApi/ChatRelay.Adapter.ClaudeApi.csproj" />
   <Project Path="src/ChatRelay.Adapter.ClaudeCli/ChatRelay.Adapter.ClaudeCli.csproj" />
   <Project Path="src/ChatRelay.Adapter.Ollama/ChatRelay.Adapter.Ollama.csproj" />
+  <Project Path="src/ChatRelay.Changes/ChatRelay.Changes.csproj" />
   <Project Path="src/ChatRelay.Contracts/ChatRelay.Contracts.csproj" />
   <Project Path="src/ChatRelay.Core/ChatRelay.Core.csproj" />
   <Project Path="src/ChatRelay.Host/ChatRelay.Host.csproj" />

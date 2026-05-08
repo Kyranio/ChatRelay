@@ -36,6 +36,11 @@ namespace ChatRelay.Backends
 
         private readonly ClaudeCliService _cli = new ClaudeCliService();
 
+        // Maps tool_use id → (ToolName, InputJson) so we can replay the
+        // metadata when a tool_result arrives. Cleared at the start of
+        // every SendPromptAsync — the CLI's tool ids are unique per turn.
+        private readonly Dictionary<string, (string Name, string Input)> _pendingToolCalls = new();
+
         public ClaudeCliAdapter()
         {
             _cli.MessageReceived += (s, e) =>
@@ -76,6 +81,31 @@ namespace ChatRelay.Backends
                                 Kind = AiEventKind.AssistantMessage,
                                 Content = e.Content
                             });
+                        // tool_use blocks fire a "Requested" observation so
+                        // the change tracker can snapshot pre-write content.
+                        // Cache id → (name, input) for the matching tool_result.
+                        foreach (var use in e.ToolUses)
+                        {
+                            if (!string.IsNullOrEmpty(use.Id))
+                                _pendingToolCalls[use.Id] = (use.Name, use.InputJson);
+                            RaiseToolCall(use.Name, use.InputJson, ToolCallPhase.Requested);
+                        }
+                        break;
+
+                    case ClaudeEventType.User:
+                        // tool_result blocks correlate by id. Replay the
+                        // cached (name, input) on the Completed phase so
+                        // the tracker can resolve the file path back to
+                        // a tracker entry without a second JSON parse.
+                        foreach (var result in e.ToolResults)
+                        {
+                            if (string.IsNullOrEmpty(result.ToolUseId)) continue;
+                            if (_pendingToolCalls.TryGetValue(result.ToolUseId, out var tup))
+                            {
+                                RaiseToolCall(tup.Name, tup.Input, ToolCallPhase.Completed);
+                                _pendingToolCalls.Remove(result.ToolUseId);
+                            }
+                        }
                         break;
 
                     case ClaudeEventType.Result when e.HasUsage:
@@ -168,6 +198,10 @@ namespace ChatRelay.Backends
 
         public override async Task SendPromptAsync(AiRequest request, CancellationToken ct)
         {
+            // Reset the per-turn tool-call cache. ids are unique per CLI
+            // invocation — leftovers from a prior turn would alias.
+            _pendingToolCalls.Clear();
+
             // Resume the server-side session if we have one; send just the
             // prompt (history lives on Anthropic's side).
             _cli.SessionId = request.SessionId;
