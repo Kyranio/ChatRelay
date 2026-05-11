@@ -68,5 +68,7 @@ namespace ChatRelay.Backends
     {
         Requested,
         Completed,
+        /// <summary>Tool ran but returned isError, threw, or never completed.</summary>
+        Failed,
     }
 }

@@ -834,57 +834,63 @@ public partial class ChatControl : UserControl
         HistoryPanel.Children.Insert(idx, line);
     }
 
+    static readonly Brush ToolFailedFg = Frozen(Color.FromRgb(220, 80, 80));
+
     void OnVmToolCallObserved(ToolCallEvent e)
     {
-        var key = !string.IsNullOrEmpty(e.CallId)
-            ? e.CallId
-            : e.ToolName + "|" + e.InputJson;
+        var key = !string.IsNullOrEmpty(e.CallId) ? e.CallId : e.ToolName + "|" + e.InputJson;
         var summary = SummarizeToolCall(e.ToolName, e.InputJson);
+        var isRequested = string.Equals(e.Phase, "requested", StringComparison.OrdinalIgnoreCase);
 
-        if (string.Equals(e.Phase, "requested", StringComparison.OrdinalIgnoreCase))
+        // Requested mid-stream splits the active bubble so subsequent text
+        // starts in a fresh one below the tool line.
+        if (isRequested) SplitStreamingBubble();
+
+        // Terminal phase with a matched in-flight line → update in place.
+        if (!isRequested && _toolCallLines.TryGetValue(key, out var existing))
         {
-            // Mid-turn tool call → split the streaming bubble so subsequent
-            // assistant text starts a fresh bubble below the tool line.
-            SplitStreamingBubble();
-            var line = new TextBlock
-            {
-                Text = "🔧 " + summary + " …",
-                FontSize = 11,
-                Opacity = 0.75,
-                FontStyle = FontStyles.Italic,
-                TextWrapping = TextWrapping.Wrap,
-                Margin = new Thickness(0, 4, 0, 4),
-            };
-            line.SetResourceReference(TextBlock.ForegroundProperty, EnvironmentColors.ToolWindowTextBrushKey);
-            _toolCallLines[key] = line;
-            HistoryPanel.Children.Add(line);
-            HistoryScroll.ScrollToEnd();
+            StyleToolCallLine(existing, summary, e.Phase);
+            _toolCallLines.Remove(key);
+            return;
+        }
+
+        var line = MakeToolCallLine(summary, e.Phase);
+        if (isRequested) _toolCallLines[key] = line;
+        HistoryPanel.Children.Add(line);
+        HistoryScroll.ScrollToEnd();
+    }
+
+    TextBlock MakeToolCallLine(string summary, string phase)
+    {
+        var line = new TextBlock
+        {
+            FontSize = 11,
+            Opacity = 0.75,
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 4, 0, 4),
+        };
+        line.SetResourceReference(TextBlock.ForegroundProperty, EnvironmentColors.ToolWindowTextBrushKey);
+        StyleToolCallLine(line, summary, phase);
+        return line;
+    }
+
+    void StyleToolCallLine(TextBlock line, string summary, string phase)
+    {
+        if (string.Equals(phase, "requested", StringComparison.OrdinalIgnoreCase))
+        {
+            line.Text = "🔧 " + summary + " …";
+            line.FontStyle = FontStyles.Italic;
+        }
+        else if (string.Equals(phase, "failed", StringComparison.OrdinalIgnoreCase))
+        {
+            line.Text = "⚠ " + summary;
+            line.FontStyle = FontStyles.Normal;
+            line.Foreground = ToolFailedFg;
         }
         else
         {
-            // Completed: update the in-flight line to its done state. If we
-            // never saw the matching Requested (e.g. event dropped or reload),
-            // append a standalone "done" line so the user still sees it.
-            if (_toolCallLines.TryGetValue(key, out var line))
-            {
-                line.Text = "✓ " + summary;
-                line.FontStyle = FontStyles.Normal;
-                _toolCallLines.Remove(key);
-            }
-            else
-            {
-                var fallback = new TextBlock
-                {
-                    Text = "✓ " + summary,
-                    FontSize = 11,
-                    Opacity = 0.75,
-                    TextWrapping = TextWrapping.Wrap,
-                    Margin = new Thickness(0, 4, 0, 4),
-                };
-                fallback.SetResourceReference(TextBlock.ForegroundProperty, EnvironmentColors.ToolWindowTextBrushKey);
-                HistoryPanel.Children.Add(fallback);
-                HistoryScroll.ScrollToEnd();
-            }
+            line.Text = "✓ " + summary;
+            line.FontStyle = FontStyles.Normal;
         }
     }
 

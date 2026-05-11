@@ -260,7 +260,9 @@ public class ClaudeCliService
             {
                 ToolUseId = block.TryGetProperty("tool_use_id", out var id) && id.ValueKind == JsonValueKind.String
                     ? id.GetString() ?? string.Empty
-                    : string.Empty
+                    : string.Empty,
+                IsError = block.TryGetProperty("is_error", out var err)
+                    && err.ValueKind == JsonValueKind.True,
             });
         }
         return evt;
@@ -452,6 +454,7 @@ public class ClaudeToolUse
 public class ClaudeToolResult
 {
     public string ToolUseId { get; set; } = string.Empty;
+    public bool IsError { get; set; }
 }
 
 public enum ClaudeEventType

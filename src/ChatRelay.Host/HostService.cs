@@ -247,24 +247,28 @@ public sealed class HostService
         void OnErr(object? _, AiErrorEvent e) =>
             _ = Rpc?.NotifyAsync("onError", new ErrorEvent(p.SessionId, e.Message));
 
-        // Route every observed tool call to the change tracker. The tracker
-        // filters to file-mutating tools and to paths inside the workspace,
-        // so unrelated traffic (Read/Grep/Glob, mcp__*, etc.) is dropped
-        // cheaply. Updates fire onChangesUpdated through ChangeTracker.Notify.
+        // Route to the change tracker (Requested/Completed only — Failed leaves
+        // the baseline intact so subsequent diffs measure from pre-write state)
+        // and fan the observation out to the shell for chat rendering.
         void OnTool(object? _, ToolCallObservedEvent e)
         {
-            _changes.Observe(p.SessionId, new ToolCallObservation
+            if (e.Phase != ChatRelay.Backends.ToolCallPhase.Failed)
             {
-                ToolName = e.ToolName,
-                InputJson = e.InputJson,
-                Phase = e.Phase == ChatRelay.Backends.ToolCallPhase.Requested
-                    ? ChatRelay.Changes.ToolCallPhase.Requested
-                    : ChatRelay.Changes.ToolCallPhase.Completed,
-            });
-            // Also surface the observation to the shell so chat can render
-            // a status line. Non-mutating tools (Read, Grep, …) get filtered
-            // by the tracker but are still useful UI feedback.
-            var phase = e.Phase == ChatRelay.Backends.ToolCallPhase.Requested ? "requested" : "completed";
+                _changes.Observe(p.SessionId, new ToolCallObservation
+                {
+                    ToolName = e.ToolName,
+                    InputJson = e.InputJson,
+                    Phase = e.Phase == ChatRelay.Backends.ToolCallPhase.Requested
+                        ? ChatRelay.Changes.ToolCallPhase.Requested
+                        : ChatRelay.Changes.ToolCallPhase.Completed,
+                });
+            }
+            var phase = e.Phase switch
+            {
+                ChatRelay.Backends.ToolCallPhase.Requested => "requested",
+                ChatRelay.Backends.ToolCallPhase.Failed => "failed",
+                _ => "completed",
+            };
             _ = Rpc?.NotifyAsync("onToolCall",
                 new ToolCallEvent(p.SessionId, e.CallId, e.ToolName, e.InputJson, phase));
         }
