@@ -1130,6 +1130,51 @@ public partial class ChatControl : UserControl
 
     public void DisposeHost() => _vm.DisposeHost(InputBox.Text, DraftSaveOnShutdownBudget);
 
+    /// <summary>
+    /// Time we'll block the UI thread waiting for the bulk accept/deny
+    /// RPC during VS shutdown. Generous enough to cover a multi-file
+    /// rewrite, capped so a stuck host can't hold VS open indefinitely.
+    /// </summary>
+    static readonly TimeSpan ChangesResolveOnShutdownBudget = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Called by <see cref="ChatRelayPackage"/> from <c>QueryClose</c>.
+    /// If the current session has open AI-authored changes, prompt the
+    /// user: accept all / deny all / cancel. Returns false only when the
+    /// user explicitly cancels — VS treats that as a veto.
+    /// </summary>
+    public bool ConfirmCloseWithPendingChanges()
+    {
+        var sessionId = _vm.CurrentSession?.Id;
+        if (sessionId is null || _vm.Proposals.Count == 0 || _vm.Host is null) return true;
+
+        var fileCount = _vm.Proposals.Count;
+        var msg = $"ChatRelay has {fileCount} pending file change{(fileCount == 1 ? string.Empty : "s")} from the AI.\n\n" +
+                  "Yes — Accept all and exit\n" +
+                  "No — Deny all and exit\n" +
+                  "Cancel — Stay in Visual Studio";
+        var result = MessageBox.Show(
+            Window.GetWindow(this) ?? Application.Current?.MainWindow,
+            msg,
+            "ChatRelay — pending changes",
+            MessageBoxButton.YesNoCancel,
+            MessageBoxImage.Question);
+
+        if (result == MessageBoxResult.Cancel) return false;
+
+#pragma warning disable VSTHRD002
+        try
+        {
+            var task = result == MessageBoxResult.Yes
+                ? _vm.Host.AcceptAllOpenChangesAsync(sessionId)
+                : _vm.Host.DenyAllOpenChangesAsync(sessionId);
+            task.Wait(ChangesResolveOnShutdownBudget);
+        }
+        catch { }
+#pragma warning restore VSTHRD002
+        return true;
+    }
+
     void SetStatus(string text) => UsageStatusBar.Text = text;
 
     static Brush Frozen(Color c) { var b = new SolidColorBrush(c); b.Freeze(); return b; }

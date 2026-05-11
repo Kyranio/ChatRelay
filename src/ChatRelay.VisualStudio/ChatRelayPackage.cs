@@ -32,4 +32,14 @@ public sealed class ChatRelayPackage : AsyncPackage
         if (disposing) ChatWindow.Control?.DisposeHost();
         base.Dispose(disposing);
     }
+
+    // Called by VS during shutdown / package unload. Returning canClose=false
+    // vetoes the close — we use that to keep VS open when the user cancels
+    // the "you have pending AI changes" prompt. Cheap no-op when chat was
+    // never opened or the session has no open proposals.
+    protected override int QueryClose(out bool canClose)
+    {
+        canClose = ChatWindow.Control?.ConfirmCloseWithPendingChanges() ?? true;
+        return Microsoft.VisualStudio.VSConstants.S_OK;
+    }
 }
