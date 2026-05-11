@@ -73,11 +73,12 @@ namespace ChatRelay.Backends
         }
 
         /// <summary>Fire a tool-call observation. No-op when nobody's listening.</summary>
-        protected void RaiseToolCall(string toolName, string inputJson, ToolCallPhase phase)
+        protected void RaiseToolCall(string toolName, string inputJson, ToolCallPhase phase, string callId = "")
         {
             if (string.IsNullOrEmpty(toolName)) return;
             ToolCallObserved?.Invoke(this, new ToolCallObservedEvent
             {
+                CallId = callId ?? string.Empty,
                 ToolName = toolName,
                 InputJson = inputJson ?? string.Empty,
                 Phase = phase,

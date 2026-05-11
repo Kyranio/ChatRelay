@@ -88,7 +88,7 @@ namespace ChatRelay.Backends
                         {
                             if (!string.IsNullOrEmpty(use.Id))
                                 _pendingToolCalls[use.Id] = (use.Name, use.InputJson);
-                            RaiseToolCall(use.Name, use.InputJson, ToolCallPhase.Requested);
+                            RaiseToolCall(use.Name, use.InputJson, ToolCallPhase.Requested, use.Id);
                         }
                         break;
 
@@ -102,7 +102,7 @@ namespace ChatRelay.Backends
                             if (string.IsNullOrEmpty(result.ToolUseId)) continue;
                             if (_pendingToolCalls.TryGetValue(result.ToolUseId, out var tup))
                             {
-                                RaiseToolCall(tup.Name, tup.Input, ToolCallPhase.Completed);
+                                RaiseToolCall(tup.Name, tup.Input, ToolCallPhase.Completed, result.ToolUseId);
                                 _pendingToolCalls.Remove(result.ToolUseId);
                             }
                         }

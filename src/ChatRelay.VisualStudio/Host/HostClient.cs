@@ -21,6 +21,7 @@ public sealed class HostClient : IDisposable
     public event Action<ErrorEvent>? Error;
     public event Action<TurnDoneParams>? TurnDone;
     public event Action<PermissionRequestEvent>? PermissionRequest;
+    public event Action<ToolCallEvent>? ToolCall;
     public event Action<McpServerSummary>? McpServerChanged;
     public event Action? AdaptersChanged;
     public event Action? ModelsChanged;
@@ -56,6 +57,7 @@ public sealed class HostClient : IDisposable
         _rpc.AddLocalRpcMethod("onError", new Action<ErrorEvent>(p => Error?.Invoke(p)));
         _rpc.AddLocalRpcMethod("onTurnDone", new Action<TurnDoneParams>(p => TurnDone?.Invoke(p)));
         _rpc.AddLocalRpcMethod("onPermissionRequest", new Action<PermissionRequestEvent>(p => PermissionRequest?.Invoke(p)));
+        _rpc.AddLocalRpcMethod("onToolCall", new Action<ToolCallEvent>(p => ToolCall?.Invoke(p)));
         _rpc.AddLocalRpcMethod("onMcpServerChanged", new Action<McpServerSummary>(p => McpServerChanged?.Invoke(p)));
         _rpc.AddLocalRpcMethod("onAdaptersChanged", new Action(() => AdaptersChanged?.Invoke()));
         _rpc.AddLocalRpcMethod("onModelsChanged", new Action(() => ModelsChanged?.Invoke()));

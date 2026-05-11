@@ -292,7 +292,7 @@ namespace ChatRelay.Backends
                     // state. Tools that don't mutate files are filtered
                     // out by the tracker; we always emit so future
                     // consumers (tool log) can see everything.
-                    RaiseToolCall(use.Name, use.InputJson, ToolCallPhase.Requested);
+                    RaiseToolCall(use.Name, use.InputJson, ToolCallPhase.Requested, use.Id);
 
                     var parsed = request.Mcp.TryParseToolId(use.Name);
                     if (parsed == null)
@@ -332,7 +332,7 @@ namespace ChatRelay.Backends
                     });
 
                     // Tool finished — post-write state is on disk now.
-                    RaiseToolCall(use.Name, use.InputJson, ToolCallPhase.Completed);
+                    RaiseToolCall(use.Name, use.InputJson, ToolCallPhase.Completed, use.Id);
                 }
 
                 messages.Add(new ApiMessage { Role = "user", Blocks = toolResults });

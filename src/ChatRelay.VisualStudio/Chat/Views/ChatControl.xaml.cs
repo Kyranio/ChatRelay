@@ -56,6 +56,22 @@ public partial class ChatControl : UserControl
     TextBlock? _streamingThinkingBlock;
     TextBlock? _streamingFooter;
     Border? _thinkingBubble;
+    // Index into _vm.StreamingText where the *current* streaming bubble
+    // begins. Bumped when we split (e.g. a permission bubble lands mid-
+    // stream and we want any further chunks to land in a fresh bubble
+    // below it). Reset to 0 on StreamingEnded.
+    int _streamingSplitOffset;
+    // Same idea for thinking: each "burst" of reasoning chunks renders into
+    // its own separate expander outside the assistant bubble. When assistant
+    // text arrives we close out the burst; the next thinking chunk starts a
+    // fresh one. Offset tracks how much of _vm.StreamingThinking the *prior*
+    // bursts already absorbed.
+    int _thinkingSplitOffset;
+    // Active tool-call status lines, keyed by adapter call id (or a synthetic
+    // fallback when the adapter didn't supply one). Lets the Completed phase
+    // update the same line we wrote on Requested. Cleared on session switch
+    // and after the streaming turn ends.
+    readonly Dictionary<string, TextBlock> _toolCallLines = new();
     System.Windows.Threading.DispatcherTimer? _idleDotsTimer;
 
     EnvDTE.SolutionEvents? _solutionEvents;
@@ -110,6 +126,7 @@ public partial class ChatControl : UserControl
         _vm.StreamingEnded += OnVmStreamingEnded;
         _vm.ErrorOccurred += AppendErrorBubble;
         _vm.PermissionRequested += AppendPermissionBubble;
+        _vm.ToolCallObserved += OnVmToolCallObserved;
         _vm.SessionsLoaded += OnVmSessionsLoaded;
         _vm.ProposalsBecameNonEmpty += OnVmProposalsBecameNonEmpty;
         _vm.PropertyChanged += OnVmPropertyChanged;
@@ -189,6 +206,7 @@ public partial class ChatControl : UserControl
             host.Error             += p => UiThread.OnUi(() => _vm.OnError(p.Message));
             host.TurnDone          += p => UiThread.OnUi(() => _vm.OnTurnDone(p.SessionId, p.Cancelled));
             host.PermissionRequest += p => UiThread.OnUi(() => _vm.OnPermissionRequest(p));
+            host.ToolCall          += p => UiThread.OnUi(() => _vm.OnToolCall(p));
             host.AdaptersChanged   += () => UiThread.OnUi(() => _ = _vm.RefreshModelsAsync());
             host.ModelsChanged     += () => UiThread.OnUi(() => _ = _vm.RefreshModelsAsync());
             host.ChangesUpdated    += s  => UiThread.OnUi(() => _vm.OnChangesUpdated(s));
@@ -260,6 +278,7 @@ public partial class ChatControl : UserControl
     void OnVmSessionLoaded(OpenSessionResult opened)
     {
         HistoryPanel.Children.Clear();
+        _toolCallLines.Clear();
         foreach (var m in opened.Messages)
         {
             if (m.Role == "user") AppendUserBubble(m.Text, references: null, timestamp: m.Timestamp);
@@ -443,15 +462,51 @@ public partial class ChatControl : UserControl
         _streamingMarkdownView = null;
         _streamingThinkingBlock = null;
         _streamingFooter = null;
+        _streamingSplitOffset = 0;
+        _thinkingSplitOffset = 0;
         ShowThinkingDots();
+    }
+
+    /// <summary>
+    /// Close out the in-flight streaming bubble in place and reset the
+    /// streaming refs so any subsequent assistant chunk creates a fresh
+    /// bubble below. Used when an intermediate (permission / error)
+    /// bubble lands mid-stream — keeps the visual continuity readable
+    /// instead of growing the same bubble around the interruption.
+    /// </summary>
+    void SplitStreamingBubble()
+    {
+        if (_streamingStack is null) return;
+        // Snapshot how much of the accumulator the *previous* bubble has
+        // already rendered. New bubble's markdown will start from here.
+        _streamingSplitOffset = _vm.StreamingText.Length;
+        _streamingStack = null;
+        _streamingLabelTb = null;
+        _streamingMarkdownView = null;
+        _streamingThinkingBlock = null;
+        _streamingFooter = null;
     }
 
     void OnVmAssistantStreamUpdated()
     {
         HideThinkingDots();
         RestartIdleDotsTimer();
+        // Assistant text after a thinking burst closes that burst and starts
+        // a fresh assistant bubble below it. Subsequent thinking would then
+        // open a new expander, keeping the visual rhythm: thought · reply ·
+        // thought · reply.
+        if (_streamingThinkingBlock is not null)
+        {
+            _thinkingSplitOffset = _vm.StreamingThinking.Length;
+            _streamingThinkingBlock = null;
+            SplitStreamingBubble();
+        }
         var stack = EnsureStreamingBubble();
-        var rebuilt = _markdown.Build(_vm.StreamingText);
+        var full = _vm.StreamingText;
+        var slice = _streamingSplitOffset > 0 && _streamingSplitOffset <= full.Length
+            ? full.Substring(_streamingSplitOffset)
+            : full;
+        var rebuilt = _markdown.Build(slice);
         if (_streamingMarkdownView is null)
         {
             var insertAt = stack.Children.Count;
@@ -472,13 +527,20 @@ public partial class ChatControl : UserControl
     {
         HideThinkingDots();
         RestartIdleDotsTimer();
-        var stack = EnsureStreamingBubble();
+        // First chunk of a new burst: split any active assistant bubble so
+        // the expander lands between the prior bubble and any later text,
+        // then add the expander as its own row in the chat history.
         if (_streamingThinkingBlock is null)
         {
+            SplitStreamingBubble();
             _streamingThinkingBlock = ThinkingBlock();
-            stack.Children.Insert(1, ThinkingExpander(_streamingThinkingBlock));
+            HistoryPanel.Children.Add(ThinkingExpander(_streamingThinkingBlock));
         }
-        _streamingThinkingBlock.Text = _vm.StreamingThinking;
+        var full = _vm.StreamingThinking;
+        var slice = _thinkingSplitOffset > 0 && _thinkingSplitOffset <= full.Length
+            ? full.Substring(_thinkingSplitOffset)
+            : full;
+        _streamingThinkingBlock.Text = slice;
         HistoryScroll.ScrollToEnd();
     }
 
@@ -513,6 +575,9 @@ public partial class ChatControl : UserControl
         _streamingMarkdownView = null;
         _streamingThinkingBlock = null;
         _streamingFooter = null;
+        _streamingSplitOffset = 0;
+        _thinkingSplitOffset = 0;
+        _toolCallLines.Clear();
         if (wasActive)
         {
             if (cancelled) SetStatus("Cancelled.");
@@ -638,6 +703,14 @@ public partial class ChatControl : UserControl
 
     void AppendAssistantBubbleStatic(string text, string? thinking, UsagePayload? usage, string? model, DateTime? timestamp = null)
     {
+        // Thinking renders as its own small unboxed expander above the
+        // assistant bubble, matching the live streaming layout.
+        if (!string.IsNullOrEmpty(thinking))
+        {
+            var tb = ThinkingBlock();
+            tb.Text = thinking!;
+            HistoryPanel.Children.Add(ThinkingExpander(tb));
+        }
         var stack = new StackPanel();
         stack.Children.Add(new TextBlock
         {
@@ -645,12 +718,6 @@ public partial class ChatControl : UserControl
             FontWeight = FontWeights.Bold,
             Foreground = Accent,
         });
-        if (!string.IsNullOrEmpty(thinking))
-        {
-            var tb = ThinkingBlock();
-            tb.Text = thinking!;
-            stack.Children.Add(ThinkingExpander(tb));
-        }
         stack.Children.Add(_markdown.Build(text));
         if (usage is not null)
         {
@@ -672,6 +739,7 @@ public partial class ChatControl : UserControl
 
     void AppendErrorBubble(string message)
     {
+        SplitStreamingBubble();
         var tb = new TextBlock { Text = "Error: " + message, TextWrapping = TextWrapping.Wrap };
         tb.SetResourceReference(TextBlock.ForegroundProperty, EnvironmentColors.ToolWindowTextBrushKey);
         HistoryPanel.Children.Add(new Border
@@ -687,6 +755,8 @@ public partial class ChatControl : UserControl
 
     void AppendPermissionBubble(PermissionRequestEvent p)
     {
+        SplitStreamingBubble();
+
         var stack = new StackPanel();
         stack.Children.Add(new TextBlock
         {
@@ -707,33 +777,16 @@ public partial class ChatControl : UserControl
             Background = Frozen(Color.FromArgb(46, 128, 128, 128)),
         });
 
-        var status = new TextBlock { FontSize = 11, Margin = new Thickness(0, 6, 0, 0), Visibility = Visibility.Collapsed };
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 8, 0, 0) };
-
         var deny = PermissionButton("Deny", "PermissionDenyButtonStyle");
         var once = PermissionButton("Allow once", "PermissionAllowOnceButtonStyle");
         var always = PermissionButton("Allow always", "PermissionAllowAlwaysButtonStyle");
         buttons.Children.Add(deny);
         buttons.Children.Add(once);
         buttons.Children.Add(always);
-
         stack.Children.Add(buttons);
-        stack.Children.Add(status);
 
-        async Task Respond(string decision, bool remember, string statusText)
-        {
-            buttons.Visibility = Visibility.Collapsed;
-            status.Text = statusText;
-            status.Visibility = Visibility.Visible;
-            try { if (_vm.Host is not null) await _vm.Host.RespondPermissionAsync(p.RequestId, decision, remember); }
-            catch { }
-        }
-
-        deny.Click += async (_, _) => await Respond("deny", remember: false, "× Denied");
-        once.Click += async (_, _) => await Respond("allow", remember: false, "✓ Allowed once");
-        always.Click += async (_, _) => await Respond("allow", remember: true, "✓ Allowed always");
-
-        HistoryPanel.Children.Add(new Border
+        var bubble = new Border
         {
             Margin = new Thickness(0, 8, 0, 8),
             Padding = new Thickness(8),
@@ -742,8 +795,136 @@ public partial class ChatControl : UserControl
             BorderBrush = Accent,
             BorderThickness = new Thickness(1),
             Child = stack,
-        });
+        };
+        HistoryPanel.Children.Add(bubble);
         HistoryScroll.ScrollToEnd();
+
+        async Task Respond(string decision, bool remember, string statusText)
+        {
+            CollapsePermissionBubble(bubble, statusText, p.ToolName);
+            try { if (_vm.Host is not null) await _vm.Host.RespondPermissionAsync(p.RequestId, decision, remember); }
+            catch { }
+        }
+
+        deny.Click += async (_, _) => await Respond("deny", remember: false, "× Denied");
+        once.Click += async (_, _) => await Respond("allow", remember: false, "✓ Allowed once");
+        always.Click += async (_, _) => await Respond("allow", remember: true, "✓ Allowed always");
+    }
+
+    /// <summary>
+    /// Replace a resolved permission bubble with a compact, background-less
+    /// status line at the same position in the chat history. The
+    /// preserved-action context (decision + tool name) sits inline as a
+    /// quiet trace of what happened.
+    /// </summary>
+    void CollapsePermissionBubble(Border bubble, string statusText, string toolName)
+    {
+        var idx = HistoryPanel.Children.IndexOf(bubble);
+        if (idx < 0) return;
+        var line = new TextBlock
+        {
+            Text = statusText + " · " + toolName,
+            FontSize = 11,
+            Opacity = 0.75,
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 4, 0, 4),
+        };
+        line.SetResourceReference(TextBlock.ForegroundProperty, EnvironmentColors.ToolWindowTextBrushKey);
+        HistoryPanel.Children.RemoveAt(idx);
+        HistoryPanel.Children.Insert(idx, line);
+    }
+
+    void OnVmToolCallObserved(ToolCallEvent e)
+    {
+        var key = !string.IsNullOrEmpty(e.CallId)
+            ? e.CallId
+            : e.ToolName + "|" + e.InputJson;
+        var summary = SummarizeToolCall(e.ToolName, e.InputJson);
+
+        if (string.Equals(e.Phase, "requested", StringComparison.OrdinalIgnoreCase))
+        {
+            // Mid-turn tool call → split the streaming bubble so subsequent
+            // assistant text starts a fresh bubble below the tool line.
+            SplitStreamingBubble();
+            var line = new TextBlock
+            {
+                Text = "🔧 " + summary + " …",
+                FontSize = 11,
+                Opacity = 0.75,
+                FontStyle = FontStyles.Italic,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 4, 0, 4),
+            };
+            line.SetResourceReference(TextBlock.ForegroundProperty, EnvironmentColors.ToolWindowTextBrushKey);
+            _toolCallLines[key] = line;
+            HistoryPanel.Children.Add(line);
+            HistoryScroll.ScrollToEnd();
+        }
+        else
+        {
+            // Completed: update the in-flight line to its done state. If we
+            // never saw the matching Requested (e.g. event dropped or reload),
+            // append a standalone "done" line so the user still sees it.
+            if (_toolCallLines.TryGetValue(key, out var line))
+            {
+                line.Text = "✓ " + summary;
+                line.FontStyle = FontStyles.Normal;
+                _toolCallLines.Remove(key);
+            }
+            else
+            {
+                var fallback = new TextBlock
+                {
+                    Text = "✓ " + summary,
+                    FontSize = 11,
+                    Opacity = 0.75,
+                    TextWrapping = TextWrapping.Wrap,
+                    Margin = new Thickness(0, 4, 0, 4),
+                };
+                fallback.SetResourceReference(TextBlock.ForegroundProperty, EnvironmentColors.ToolWindowTextBrushKey);
+                HistoryPanel.Children.Add(fallback);
+                HistoryScroll.ScrollToEnd();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Format a tool call as a one-line human label. Pulls the most
+    /// useful argument out of the JSON for the well-known tools (file
+    /// path, command, search pattern); falls back to the bare tool name
+    /// for anything we don't recognise — including MCP tools, where the
+    /// server.tool naming is already informative.
+    /// </summary>
+    static string SummarizeToolCall(string toolName, string inputJson)
+    {
+        if (string.IsNullOrEmpty(inputJson)) return toolName;
+        string? Arg(System.Text.Json.JsonElement root, string name) =>
+            root.TryGetProperty(name, out var v) && v.ValueKind == System.Text.Json.JsonValueKind.String
+                ? v.GetString() : null;
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(inputJson);
+            var root = doc.RootElement;
+            string? detail = toolName switch
+            {
+                "Read" or "Write" or "Edit" or "MultiEdit" or "NotebookEdit"
+                    => Arg(root, "file_path") ?? Arg(root, "filePath") ?? Arg(root, "path"),
+                "Bash" or "BashOutput" or "PowerShell"
+                    => Arg(root, "command"),
+                "Glob"
+                    => Arg(root, "pattern"),
+                "Grep"
+                    => Arg(root, "pattern"),
+                "WebFetch" or "WebSearch"
+                    => Arg(root, "url") ?? Arg(root, "query"),
+                _ => null,
+            };
+            if (string.IsNullOrEmpty(detail)) return toolName;
+            const int max = 80;
+            if (detail!.Length > max) detail = detail.Substring(0, max - 1) + "…";
+            return toolName + " " + detail;
+        }
+        catch { return toolName; }
     }
 
     Button PermissionButton(string label, string styleKey) => new()

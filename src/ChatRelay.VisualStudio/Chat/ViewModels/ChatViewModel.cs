@@ -181,6 +181,7 @@ public sealed class ChatViewModel : INotifyPropertyChanged
 
     /// <summary>A permission request landed; view renders an inline approval bubble.</summary>
     public event Action<PermissionRequestEvent>? PermissionRequested;
+    public event Action<ToolCallEvent>? ToolCallObserved;
 
     /// <summary>
     /// Fires after <see cref="Proposals"/> has just transitioned from empty
@@ -576,6 +577,13 @@ public sealed class ChatViewModel : INotifyPropertyChanged
 
     public void OnError(string message) => ErrorOccurred?.Invoke(message);
     public void OnPermissionRequest(PermissionRequestEvent p) => PermissionRequested?.Invoke(p);
+
+    /// <summary>Drop tool-call observations for sessions that aren't on screen — they belong to background turns.</summary>
+    public void OnToolCall(ToolCallEvent p)
+    {
+        if (_currentSession is null || p.SessionId != _currentSession.Id) return;
+        ToolCallObserved?.Invoke(p);
+    }
 
     // ---- Change-tracking ingest ---------------------------------------
 

@@ -251,7 +251,8 @@ public sealed class HostService
         // filters to file-mutating tools and to paths inside the workspace,
         // so unrelated traffic (Read/Grep/Glob, mcp__*, etc.) is dropped
         // cheaply. Updates fire onChangesUpdated through ChangeTracker.Notify.
-        void OnTool(object? _, ToolCallObservedEvent e) =>
+        void OnTool(object? _, ToolCallObservedEvent e)
+        {
             _changes.Observe(p.SessionId, new ToolCallObservation
             {
                 ToolName = e.ToolName,
@@ -260,6 +261,13 @@ public sealed class HostService
                     ? ChatRelay.Changes.ToolCallPhase.Requested
                     : ChatRelay.Changes.ToolCallPhase.Completed,
             });
+            // Also surface the observation to the shell so chat can render
+            // a status line. Non-mutating tools (Read, Grep, …) get filtered
+            // by the tracker but are still useful UI feedback.
+            var phase = e.Phase == ChatRelay.Backends.ToolCallPhase.Requested ? "requested" : "completed";
+            _ = Rpc?.NotifyAsync("onToolCall",
+                new ToolCallEvent(p.SessionId, e.CallId, e.ToolName, e.InputJson, phase));
+        }
 
         adapter.MessageReceived += OnMsg;
         adapter.ErrorReceived += OnErr;
