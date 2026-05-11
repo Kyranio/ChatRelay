@@ -1130,6 +1130,40 @@ public partial class ChatControl : UserControl
 
     public void DisposeHost() => _vm.DisposeHost(InputBox.Text, DraftSaveOnShutdownBudget);
 
+    static readonly TimeSpan ChangesResolveOnShutdownBudget = TimeSpan.FromSeconds(5);
+
+    /// <summary>Called from <see cref="ChatRelayPackage.QueryClose"/>; returns false to veto VS shutdown.</summary>
+    public bool ConfirmCloseWithPendingChanges()
+    {
+        var sessionId = _vm.CurrentSession?.Id;
+        if (sessionId is null || _vm.Host is null) return true;
+
+        // Proposals rows stick around after accept/deny; HasOpenChanges filters out the resolved ones.
+        var fileCount = _vm.Proposals.Count(p => p.HasOpenChanges);
+        if (fileCount == 0) return true;
+
+        var msg = $"ChatRelay has {fileCount} pending file change{(fileCount == 1 ? "" : "s")} from the AI.\n\n" +
+                  "Yes — Accept all and exit\nNo — Deny all and exit\nCancel — Stay in Visual Studio";
+        var result = MessageBox.Show(
+            Window.GetWindow(this) ?? Application.Current?.MainWindow,
+            msg, "ChatRelay — pending changes",
+            MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
+
+        if (result == MessageBoxResult.Cancel) return false;
+
+#pragma warning disable VSTHRD002
+        try
+        {
+            var task = result == MessageBoxResult.Yes
+                ? _vm.Host.AcceptAllOpenChangesAsync(sessionId)
+                : _vm.Host.DenyAllOpenChangesAsync(sessionId);
+            task.Wait(ChangesResolveOnShutdownBudget);
+        }
+        catch { }
+#pragma warning restore VSTHRD002
+        return true;
+    }
+
     void SetStatus(string text) => UsageStatusBar.Text = text;
 
     static Brush Frozen(Color c) { var b = new SolidColorBrush(c); b.Freeze(); return b; }
