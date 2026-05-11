@@ -1146,9 +1146,17 @@ public partial class ChatControl : UserControl
     public bool ConfirmCloseWithPendingChanges()
     {
         var sessionId = _vm.CurrentSession?.Id;
-        if (sessionId is null || _vm.Proposals.Count == 0 || _vm.Host is null) return true;
+        if (sessionId is null || _vm.Host is null) return true;
+        // Proposals stays populated after accept/deny — line counts drop
+        // to zero so the row can keep showing its accepted-line totals.
+        // The canonical "are there open changes" signal is the same one
+        // the status bar uses.
+        if (_vm.OpenLinesAdded == 0 && _vm.OpenLinesRemoved == 0) return true;
 
-        var fileCount = _vm.Proposals.Count;
+        var fileCount = 0;
+        foreach (var p in _vm.Proposals) if (p.HasOpenChanges) fileCount++;
+        if (fileCount == 0) return true;
+
         var msg = $"ChatRelay has {fileCount} pending file change{(fileCount == 1 ? string.Empty : "s")} from the AI.\n\n" +
                   "Yes — Accept all and exit\n" +
                   "No — Deny all and exit\n" +
