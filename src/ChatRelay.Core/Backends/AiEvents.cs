@@ -57,6 +57,8 @@ namespace ChatRelay.Backends
     /// </summary>
     public class ToolCallObservedEvent : EventArgs
     {
+        /// <summary>Adapter-assigned id correlating Requested with Completed for the same call. Empty if the adapter doesn't carry an id (best-effort callers should fall back to (ToolName, InputJson)).</summary>
+        public string CallId { get; set; } = string.Empty;
         public string ToolName { get; set; } = string.Empty;
         public string InputJson { get; set; } = string.Empty;
         public ToolCallPhase Phase { get; set; }
@@ -66,5 +68,7 @@ namespace ChatRelay.Backends
     {
         Requested,
         Completed,
+        /// <summary>Tool ran but returned isError, threw, or never completed.</summary>
+        Failed,
     }
 }

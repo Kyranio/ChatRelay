@@ -287,12 +287,9 @@ namespace ChatRelay.Backends
                 var toolResults = new List<ApiBlock>();
                 foreach (var use in toolUses)
                 {
-                    // Fire the "Requested" observation BEFORE executing so
-                    // the change tracker can snapshot the pre-write file
-                    // state. Tools that don't mutate files are filtered
-                    // out by the tracker; we always emit so future
-                    // consumers (tool log) can see everything.
-                    RaiseToolCall(use.Name, use.InputJson, ToolCallPhase.Requested);
+                    // Requested fires before execution so the tracker can snapshot
+                    // pre-write state. Non-mutating tools get filtered downstream.
+                    RaiseToolCall(use.Name, use.InputJson, ToolCallPhase.Requested, use.Id);
 
                     var parsed = request.Mcp.TryParseToolId(use.Name);
                     if (parsed == null)
@@ -304,9 +301,7 @@ namespace ChatRelay.Backends
                             Text = $"Unknown tool: {use.Name}",
                             IsError = true
                         });
-                        // No execution happened — no point firing Completed
-                        // either; the tracker would just re-read identical
-                        // content as LastApplied.
+                        RaiseToolCall(use.Name, use.InputJson, ToolCallPhase.Failed, use.Id);
                         continue;
                     }
 
@@ -321,8 +316,18 @@ namespace ChatRelay.Backends
                         catch (JsonException) { /* empty args — pass default */ }
                     }
 
-                    var result = await request.Mcp.CallToolAsync(
-                        parsed.Value.Server, parsed.Value.Tool, args, ct).ConfigureAwait(false);
+                    McpToolResult result;
+                    try
+                    {
+                        result = await request.Mcp.CallToolAsync(
+                            parsed.Value.Server, parsed.Value.Tool, args, ct).ConfigureAwait(false);
+                    }
+                    catch
+                    {
+                        RaiseToolCall(use.Name, use.InputJson, ToolCallPhase.Failed, use.Id);
+                        throw;
+                    }
+
                     toolResults.Add(new ApiBlock
                     {
                         Type = "tool_result",
@@ -331,8 +336,9 @@ namespace ChatRelay.Backends
                         IsError = result.IsError
                     });
 
-                    // Tool finished — post-write state is on disk now.
-                    RaiseToolCall(use.Name, use.InputJson, ToolCallPhase.Completed);
+                    RaiseToolCall(use.Name, use.InputJson,
+                        result.IsError ? ToolCallPhase.Failed : ToolCallPhase.Completed,
+                        use.Id);
                 }
 
                 messages.Add(new ApiMessage { Role = "user", Blocks = toolResults });
