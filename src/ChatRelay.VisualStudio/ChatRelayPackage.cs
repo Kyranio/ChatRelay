@@ -32,4 +32,10 @@ public sealed class ChatRelayPackage : AsyncPackage
         if (disposing) ChatWindow.Control?.DisposeHost();
         base.Dispose(disposing);
     }
+
+    protected override int QueryClose(out bool canClose)
+    {
+        canClose = ChatWindow.Control?.ConfirmCloseWithPendingChanges() ?? true;
+        return Microsoft.VisualStudio.VSConstants.S_OK;
+    }
 }
