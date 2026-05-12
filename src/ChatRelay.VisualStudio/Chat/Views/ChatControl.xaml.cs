@@ -72,6 +72,10 @@ public partial class ChatControl : UserControl
     // update the same line we wrote on Requested. Cleared on session switch
     // and after the streaming turn ends.
     readonly Dictionary<string, TextBlock> _toolCallLines = new();
+    // Keys (toolName|inputJson) the user explicitly denied via a permission
+    // bubble. Consumed once when the matching Failed tool-call event arrives
+    // so it can render as a quiet "× skipped" instead of a red "⚠ failed".
+    readonly HashSet<string> _recentlyDeniedKeys = new();
     System.Windows.Threading.DispatcherTimer? _idleDotsTimer;
 
     EnvDTE.SolutionEvents? _solutionEvents;
@@ -279,6 +283,7 @@ public partial class ChatControl : UserControl
     {
         HistoryPanel.Children.Clear();
         _toolCallLines.Clear();
+        _recentlyDeniedKeys.Clear();
         foreach (var m in opened.Messages)
         {
             if (m.Role == "user") AppendUserBubble(m.Text, references: null, timestamp: m.Timestamp);
@@ -578,6 +583,7 @@ public partial class ChatControl : UserControl
         _streamingSplitOffset = 0;
         _thinkingSplitOffset = 0;
         _toolCallLines.Clear();
+        _recentlyDeniedKeys.Clear();
         if (wasActive)
         {
             if (cancelled) SetStatus("Cancelled.");
@@ -758,13 +764,16 @@ public partial class ChatControl : UserControl
         SplitStreamingBubble();
 
         var stack = new StackPanel();
-        stack.Children.Add(new TextBlock
+        var header = new TextBlock
         {
             Text = "🔐 Permission requested: " + p.ToolName,
             FontWeight = FontWeights.Bold,
             Margin = new Thickness(0, 0, 0, 6),
-        });
-        stack.Children.Add(new TextBox
+        };
+        header.SetResourceReference(TextBlock.ForegroundProperty, EnvironmentColors.ToolWindowTextBrushKey);
+        stack.Children.Add(header);
+
+        var preview = new TextBox
         {
             Text = PrettyJson(p.InputJson),
             IsReadOnly = true,
@@ -774,8 +783,10 @@ public partial class ChatControl : UserControl
             MaxHeight = 140,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             BorderThickness = new Thickness(0),
-            Background = Frozen(Color.FromArgb(46, 128, 128, 128)),
-        });
+        };
+        preview.SetResourceReference(TextBox.BackgroundProperty, EnvironmentColors.ComboBoxBackgroundBrushKey);
+        preview.SetResourceReference(TextBox.ForegroundProperty, EnvironmentColors.ToolWindowTextBrushKey);
+        stack.Children.Add(preview);
 
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 8, 0, 0) };
         var deny = PermissionButton("Deny", "PermissionDenyButtonStyle");
@@ -786,14 +797,14 @@ public partial class ChatControl : UserControl
         buttons.Children.Add(always);
         stack.Children.Add(buttons);
 
+        // Same styling as the assistant bubble — the internal layout (header
+        // + JSON preview + action buttons) already signals "this is different".
         var bubble = new Border
         {
             Margin = new Thickness(0, 8, 0, 8),
             Padding = new Thickness(8),
             CornerRadius = new CornerRadius(4),
             Background = AssistantBubbleBg,
-            BorderBrush = Accent,
-            BorderThickness = new Thickness(1),
             Child = stack,
         };
         HistoryPanel.Children.Add(bubble);
@@ -806,7 +817,11 @@ public partial class ChatControl : UserControl
             catch { }
         }
 
-        deny.Click += async (_, _) => await Respond("deny", remember: false, "× Denied");
+        deny.Click += async (_, _) =>
+        {
+            _recentlyDeniedKeys.Add(p.ToolName + "|" + p.InputJson);
+            await Respond("deny", remember: false, "× Denied");
+        };
         once.Click += async (_, _) => await Respond("allow", remember: false, "✓ Allowed once");
         always.Click += async (_, _) => await Respond("allow", remember: true, "✓ Allowed always");
     }
@@ -834,7 +849,7 @@ public partial class ChatControl : UserControl
         HistoryPanel.Children.Insert(idx, line);
     }
 
-    static readonly Brush ToolFailedFg = Frozen(Color.FromRgb(220, 80, 80));
+    static readonly Brush ToolFailedFg = Frozen(Color.FromRgb(240, 80, 80));
 
     void OnVmToolCallObserved(ToolCallEvent e)
     {
@@ -842,19 +857,22 @@ public partial class ChatControl : UserControl
         var summary = SummarizeToolCall(e.ToolName, e.InputJson);
         var isRequested = string.Equals(e.Phase, "requested", StringComparison.OrdinalIgnoreCase);
 
-        // Requested mid-stream splits the active bubble so subsequent text
-        // starts in a fresh one below the tool line.
+        // Failed-because-user-denied is a quiet "skipped" outcome, not a red error.
+        var phase = e.Phase;
+        if (string.Equals(e.Phase, "failed", StringComparison.OrdinalIgnoreCase)
+            && _recentlyDeniedKeys.Remove(e.ToolName + "|" + e.InputJson))
+            phase = "denied";
+
         if (isRequested) SplitStreamingBubble();
 
-        // Terminal phase with a matched in-flight line → update in place.
         if (!isRequested && _toolCallLines.TryGetValue(key, out var existing))
         {
-            StyleToolCallLine(existing, summary, e.Phase);
+            StyleToolCallLine(existing, summary, phase);
             _toolCallLines.Remove(key);
             return;
         }
 
-        var line = MakeToolCallLine(summary, e.Phase);
+        var line = MakeToolCallLine(summary, phase);
         if (isRequested) _toolCallLines[key] = line;
         HistoryPanel.Children.Add(line);
         HistoryScroll.ScrollToEnd();
@@ -886,6 +904,13 @@ public partial class ChatControl : UserControl
             line.Text = "⚠ " + summary;
             line.FontStyle = FontStyles.Normal;
             line.Foreground = ToolFailedFg;
+            line.Opacity = 1.0; // full saturation — failures shouldn't fade with the rest
+        }
+        else if (string.Equals(phase, "denied", StringComparison.OrdinalIgnoreCase))
+        {
+            // User-denied — same neutral gray as completed, just a different glyph.
+            line.Text = "× " + summary;
+            line.FontStyle = FontStyles.Normal;
         }
         else
         {
