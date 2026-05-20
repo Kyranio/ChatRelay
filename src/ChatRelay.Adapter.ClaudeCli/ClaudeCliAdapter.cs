@@ -88,21 +88,22 @@ namespace ChatRelay.Backends
                         {
                             if (!string.IsNullOrEmpty(use.Id))
                                 _pendingToolCalls[use.Id] = (use.Name, use.InputJson);
-                            RaiseToolCall(use.Name, use.InputJson, ToolCallPhase.Requested);
+                            RaiseToolCall(use.Name, use.InputJson, ToolCallPhase.Requested, use.Id);
                         }
                         break;
 
                     case ClaudeEventType.User:
-                        // tool_result blocks correlate by id. Replay the
-                        // cached (name, input) on the Completed phase so
-                        // the tracker can resolve the file path back to
-                        // a tracker entry without a second JSON parse.
+                        // tool_result blocks correlate by id. Replay the cached
+                        // (name, input) so the tracker can resolve the file path
+                        // without re-parsing JSON. is_error flips Completed → Failed.
                         foreach (var result in e.ToolResults)
                         {
                             if (string.IsNullOrEmpty(result.ToolUseId)) continue;
                             if (_pendingToolCalls.TryGetValue(result.ToolUseId, out var tup))
                             {
-                                RaiseToolCall(tup.Name, tup.Input, ToolCallPhase.Completed);
+                                RaiseToolCall(tup.Name, tup.Input,
+                                    result.IsError ? ToolCallPhase.Failed : ToolCallPhase.Completed,
+                                    result.ToolUseId);
                                 _pendingToolCalls.Remove(result.ToolUseId);
                             }
                         }
@@ -227,6 +228,13 @@ namespace ChatRelay.Backends
             }
             finally
             {
+                // Any tool_use without a matching tool_result by turn-end
+                // failed (CLI died, turn cancelled, model abandoned the call).
+                // Fire Failed so the UI can resolve the in-flight line.
+                foreach (var kv in _pendingToolCalls)
+                    RaiseToolCall(kv.Value.Name, kv.Value.Input, ToolCallPhase.Failed, kv.Key);
+                _pendingToolCalls.Clear();
+
                 // Emit one final session update so the caller picks up any id
                 // assigned on this turn.
                 if (!string.IsNullOrEmpty(_cli.SessionId))

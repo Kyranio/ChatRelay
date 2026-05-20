@@ -81,6 +81,15 @@ public record RemoveMcpFileParams(string Path);
 public record PermissionRequestEvent(string RequestId, string SessionId, string ToolName, string InputJson);
 public record RespondPermissionParams(string RequestId, string Decision, bool Remember);
 
+// Tool-call observations ------------------------------------------------------
+//
+// Surfaces every tool the model invokes during a turn so the chat UI can show
+// a small status line ("Read foo.cs", "Edit bar.cs") and update from in-flight
+// to completed. Phase is "requested" or "completed" (lowercase on the wire).
+// CallId correlates the two phases for the same call; empty when the adapter
+// can't provide one — UI falls back to (ToolName, InputJson) matching.
+public record ToolCallEvent(string SessionId, string CallId, string ToolName, string InputJson, string Phase);
+
 // Change tracking ------------------------------------------------------------
 //
 // Volatile, in-memory only on the host. Per-session. Cleared when the host
