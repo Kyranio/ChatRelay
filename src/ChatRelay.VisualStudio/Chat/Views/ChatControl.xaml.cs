@@ -175,12 +175,6 @@ public partial class ChatControl : UserControl
             case nameof(ChatViewModel.AcceptedLinesRemoved):
                 UpdateChangesHeader();
                 break;
-            case nameof(ChatViewModel.OpenLinesAdded):
-            case nameof(ChatViewModel.OpenLinesRemoved):
-            case nameof(ChatViewModel.AcceptedLinesAdded):
-            case nameof(ChatViewModel.AcceptedLinesRemoved):
-                UpdateChangesHeader();
-                break;
         }
     }
 
