@@ -158,14 +158,16 @@ public partial class ChatControl : UserControl
                 }
                 break;
             case nameof(ChatViewModel.IsBusy):
-                // Lock session-management controls during a streaming
-                // turn so a mid-stream session switch can't corrupt
-                // routing. Esc still cancels the turn.
+                // Session controls lock during a streaming turn so a
+                // mid-stream switch can't corrupt routing. The send button
+                // stays enabled and flips into a stop button — clicking it
+                // (or pressing Esc) cancels the turn.
                 var enabled = !_vm.IsBusy;
                 SessionBox.IsEnabled = enabled;
                 NewSessionButton.IsEnabled = enabled;
                 DeleteSessionButton.IsEnabled = enabled;
-                SendButton.IsEnabled = enabled;
+                SendButton.Content = _vm.IsBusy ? "■" : "⏎";
+                SendButton.ToolTip = _vm.IsBusy ? "Stop (Esc)" : "Send (Enter)";
                 break;
             case nameof(ChatViewModel.OpenLinesAdded):
             case nameof(ChatViewModel.OpenLinesRemoved):
@@ -435,6 +437,9 @@ public partial class ChatControl : UserControl
         if (e.Key == Key.Enter && (Keyboard.Modifiers & ModifierKeys.Shift) == 0)
         {
             e.Handled = true;
+            // Enter during a stream is a typing event — don't fire the
+            // button (which would now cancel). Esc is the keybind for stop.
+            if (_vm.IsBusy) return;
             SendButton_Click(sender, new RoutedEventArgs());
         }
         else if (e.Key == Key.Escape)
@@ -446,6 +451,7 @@ public partial class ChatControl : UserControl
 
     async void SendButton_Click(object sender, RoutedEventArgs e)
     {
+        if (_vm.IsBusy) { await _vm.CancelAsync(); return; }
         if (ModelBox.SelectedItem is not AiModel model) { SetStatus("Pick a model first."); return; }
         var text = InputBox.Text.Trim();
         if (text.Length == 0) return;
