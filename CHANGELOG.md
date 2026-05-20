@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] — 2026-05-20
+
+A round of chat-side UX polish. The send button doubles as a stop
+button during a streaming turn, every tool call the model invokes
+shows up as an inline status line that resolves to success / failure /
+denied, mid-stream interruptions (permission prompts, errors, tool
+calls, thinking bursts) now split the streaming bubble cleanly
+instead of growing one big bubble around them, and the permission
+bubble follows the active VS theme. Closing VS with open AI proposals
+prompts to accept / deny / cancel instead of silently dropping them.
+
+### Added
+- **Send / stop toggle on the send button.** Stays enabled during a
+  streaming turn and flips to a stop glyph (`■`); clicking it cancels
+  the in-flight turn via the existing `CancelAsync` /
+  `Host.CancelTurnAsync` pipe. Esc continues to work as the explicit
+  cancel keybind. Enter during a stream is a typing-friendly no-op so
+  a reflex Enter doesn't kill the turn.
+- **Inline tool-call status lines.** Every tool the model invokes
+  renders as a compact line (`🔧 Read foo.cs …` in-flight, `✓ Read foo.cs`
+  on completion), matched on the adapter's tool-use id with a
+  `(toolName, inputJson)` fallback. `SummarizeToolCall` extracts the
+  most useful arg per well-known tool (file_path, command, pattern,
+  url).
+- **Tool-failure surfacing.** Unknown tool name, exception during
+  `CallToolAsync`, MCP `result.IsError`, CLI `tool_result is_error`,
+  and turn-end-with-stragglers all now render as a saturated red
+  `⚠ ToolName` line. User-denied permissions render as a quiet gray
+  `× ToolName` instead — a user choice isn't an error.
+- **Confirm-on-close prompt for pending AI changes.** VS shutdown
+  asks accept all / deny all / cancel when the session has open
+  proposals. Bounded by a 5 s wait on the bulk RPC so a stuck host
+  can't trap VS.
+- **Streaming-bubble splits.** Permission prompts, errors, tool-call
+  lines, and thinking bursts close the active streaming bubble in
+  place — subsequent assistant chunks start in a fresh bubble below.
+  Thinking expanders live as their own row, yielding a thought · reply
+  · thought · reply rhythm.
+- **Permission collapse to a trace line.** After the user clicks
+  Allow once / Allow always / Deny, the bubble collapses in place to
+  a compact `✓ Allowed once · Edit` / `× Denied · Edit` line.
+
+### Wire (Contracts)
+- New `ToolCallEvent(SessionId, CallId, ToolName, InputJson, Phase)`
+  DTO and `onToolCall` JSON-RPC notification — `Phase` is
+  `"requested" | "completed" | "failed"`. Additive, no protocol
+  break.
+- `ToolCallPhase.Failed` added to the adapter-side enum so every
+  failure path can be signalled without protocol churn.
+
+### Changed
+- **Permission bubble theming.** Dropped the loud turquoise accent
+  border; the JSON preview and header now use theme-aware
+  `ComboBoxBackgroundBrushKey` / `ToolWindowTextBrushKey`, so the
+  bubble flows with the active VS theme.
+
+### Fixed
+- **CLI tool-call leak.** `ClaudeCliAdapter._pendingToolCalls` no
+  longer retains entries when a turn crashes or is cancelled
+  mid-tool. `SendPromptAsync`'s `finally` drains any stragglers and
+  fires `Failed` so stuck `🔧 …` lines resolve.
+
 ## [0.1.2] — 2026-05-08
 
 Inline change tracking. Every model edit now lights up directly in the
