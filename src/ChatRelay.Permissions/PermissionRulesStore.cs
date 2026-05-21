@@ -52,6 +52,14 @@ namespace ChatRelay.Permissions
             if (set.Add(toolName)) SaveFile(GlobalPath, set);
         }
 
+        /// <summary>Drop a previously-stored global allow. No-op when the rule isn't there.</summary>
+        public static void RemoveGlobal(string toolName)
+        {
+            if (string.IsNullOrEmpty(toolName)) return;
+            var set = LoadGlobal();
+            if (set.Remove(toolName)) SaveFile(GlobalPath, set);
+        }
+
         public static HashSet<string> LoadWorkspace(string? workspacePath)
             => LoadFile(WorkspacePathFor(workspacePath));
 
@@ -61,6 +69,15 @@ namespace ChatRelay.Permissions
             var path = WorkspacePathFor(workspacePath);
             var set = LoadFile(path);
             if (set.Add(toolName)) SaveFile(path, set);
+        }
+
+        /// <summary>Drop a previously-stored workspace allow. No-op when the rule isn't there.</summary>
+        public static void RemoveWorkspace(string? workspacePath, string toolName)
+        {
+            if (string.IsNullOrEmpty(toolName)) return;
+            var path = WorkspacePathFor(workspacePath);
+            var set = LoadFile(path);
+            if (set.Remove(toolName)) SaveFile(path, set);
         }
 
         private static string WorkspacePathFor(string? workspacePath)
@@ -152,6 +169,17 @@ namespace ChatRelay.Permissions
                     _rules[sessionId] = set;
                 }
                 set.Add(MakeKey(toolName, externalFolder));
+            }
+        }
+
+        /// <summary>Drop a previously-stored session allow. No-op when the rule isn't there.</summary>
+        public void Remove(string sessionId, string toolName, string externalFolder)
+        {
+            if (string.IsNullOrEmpty(sessionId) || string.IsNullOrEmpty(toolName)) return;
+            lock (_lock)
+            {
+                if (_rules.TryGetValue(sessionId, out var set))
+                    set.Remove(MakeKey(toolName, externalFolder));
             }
         }
 
