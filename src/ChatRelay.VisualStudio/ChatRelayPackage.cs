@@ -25,6 +25,7 @@ public sealed class ChatRelayPackage : AsyncPackage
         await Commands.OpenChatWindowCommand.InitializeAsync(this);
         await Commands.SendSelectionCommand.InitializeAsync(this);
         await Commands.AddFileToClaudeCommand.InitializeAsync(this);
+        await Commands.ReviewCurrentBranchCommand.InitializeAsync(this);
     }
 
     protected override void Dispose(bool disposing)
