@@ -47,6 +47,15 @@
     </Buttons>
   </Commands>
 
+  <!-- Mirror cmdidSendSelection into the Tools menu so users who don't
+       know the right-click / keybind path can still discover it. The
+       primary Parent (right-click code window) stays on the Button. -->
+  <CommandPlacements>
+    <CommandPlacement guid="guidClaudeCmdSet" id="cmdidSendSelection" priority="0x0101">
+      <Parent guid="guidClaudeCmdSet" id="ClaudeToolsGroup"/>
+    </CommandPlacement>
+  </CommandPlacements>
+
   <KeyBindings>
     <!-- Ctrl+Alt+S sends the current selection to Claude. -->
     <KeyBinding guid="guidClaudeCmdSet" id="cmdidSendSelection"
