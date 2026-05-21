@@ -40,30 +40,35 @@ namespace ChatRelay.Permissions
         {
             externalFolder = string.Empty;
 
-            // No workspace means there's nothing for paths to fall outside
-            // of — treat everything as in-workspace so the workspace-scoped
-            // allow buttons still surface in chat.
-            if (string.IsNullOrEmpty(workspaceRoot)) return true;
-
-            var workspaceCanonical = Canonicalise(workspaceRoot!);
-            if (workspaceCanonical is null) return true;
+            // No workspace → no in-workspace concept; any extracted path is
+            // treated as external and scoped exactly to itself.
+            var workspaceCanonical = string.IsNullOrEmpty(workspaceRoot)
+                ? null
+                : Canonicalise(workspaceRoot!);
 
             foreach (var path in ExtractPaths(inputJson))
             {
                 var resolved = Canonicalise(path, workspaceRoot);
                 if (resolved is null) continue;
 
-                if (!IsUnder(resolved, workspaceCanonical))
+                if (workspaceCanonical is null || !IsUnder(resolved, workspaceCanonical))
                 {
-                    // Lowest-point parent — use the directory containing
-                    // the path. For directory paths Path.GetDirectoryName
-                    // yields the parent; that's the right grain.
-                    var parent = Directory.Exists(resolved) ? resolved : Path.GetDirectoryName(resolved);
-                    externalFolder = parent ?? resolved;
+                    // Scope to the exact resolved path. Reducing to a parent
+                    // (Directory.Exists ? path : GetDirectoryName) collapsed
+                    // sibling folders like C:\temp and C:\otherfolder to the
+                    // drive root when neither existed on disk, which made a
+                    // session-allow for one auto-allow the other.
+                    externalFolder = resolved;
                     return false;
                 }
             }
-            return true;
+
+            // No path could be extracted. With a workspace, default to
+            // in-workspace (the broker bubble's 4-button layout is fine for
+            // pathless tools like `pwd`). Without one, default to external
+            // with an empty folder — the session-allow button labels itself
+            // "for this session" in that case.
+            return workspaceCanonical is not null;
         }
 
         private static System.Collections.Generic.IEnumerable<string> ExtractPaths(string inputJson)
