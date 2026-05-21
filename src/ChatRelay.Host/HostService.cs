@@ -21,7 +21,23 @@ public sealed class HostService
     readonly ChangeTracker _changes = new();
     readonly ConcurrentDictionary<string, CancellationTokenSource> _inflight = new();
     readonly ConcurrentDictionary<string, TaskCompletionSource<PermissionDecision>> _pendingPermissions = new();
+    // Side-table to RespondPermissionAsync — carries the context we'd otherwise
+    // need the shell to echo back (toolName + scope info for persistence).
+    readonly ConcurrentDictionary<string, PendingPermissionContext> _pendingPermissionContext = new();
+    readonly SessionRules _sessionRules = new();
+    // Tracks which stored rule auto-allowed each in-flight tool_use, keyed by
+    // the CLI's tool_use_id. On a Failed observation we revoke that rule so
+    // a later request to the same path can't ride the leftover grant from a
+    // call that didn't actually succeed.
+    readonly ConcurrentDictionary<string, AutoAllowRecord> _autoAllowed = new();
     string? _workspace;
+
+    record PendingPermissionContext(string SessionId, string ToolName, bool InWorkspace, string ExternalFolder);
+
+    // Tier: "global" | "workspace" | "session". WorkspacePath/SessionId/
+    // ExternalFolder are populated per tier — the revoker uses whichever is
+    // relevant.
+    record AutoAllowRecord(string Tier, string ToolName, string? WorkspacePath, string SessionId, string ExternalFolder);
 
     public JsonRpc? Rpc { get; set; }
     public string BrokerPipeName => _broker.PipeName;
@@ -264,6 +280,12 @@ public sealed class HostService
                         : ChatRelay.Changes.ToolCallPhase.Completed,
                 });
             }
+            // On Failed: revoke whatever stored rule auto-allowed this call.
+            // On Completed: drop the tracking entry — no longer needed.
+            if (e.Phase == ChatRelay.Backends.ToolCallPhase.Failed)
+                RevokeAutoAllow(e.CallId);
+            else if (e.Phase == ChatRelay.Backends.ToolCallPhase.Completed)
+                _autoAllowed.TryRemove(e.CallId, out AutoAllowRecord? _);
             var phase = e.Phase switch
             {
                 ChatRelay.Backends.ToolCallPhase.Requested => "requested",
@@ -407,25 +429,94 @@ public sealed class HostService
     [JsonRpcMethod("respondPermission", UseSingleObjectParameterDeserialization = true)]
     public Task RespondPermissionAsync(RespondPermissionParams p)
     {
-        if (_pendingPermissions.TryRemove(p.RequestId, out var tcs))
+        if (!_pendingPermissions.TryRemove(p.RequestId, out var tcs)) return Task.CompletedTask;
+        _pendingPermissionContext.TryRemove(p.RequestId, out var ctx);
+
+        var allow = p.Decision.Equals("allow", StringComparison.OrdinalIgnoreCase);
+        if (allow && ctx is not null)
         {
-            tcs.TrySetResult(new PermissionDecision
+            switch ((p.Scope ?? "once").ToLowerInvariant())
             {
-                Allow = p.Decision.Equals("allow", StringComparison.OrdinalIgnoreCase),
-                AlwaysAllow = p.Remember,
-            });
+                case "global":
+                    PermissionRulesStore.AddGlobal(ctx.ToolName);
+                    break;
+                case "workspace":
+                    PermissionRulesStore.AddWorkspace(_workspace, ctx.ToolName);
+                    break;
+                case "session":
+                    _sessionRules.Add(ctx.SessionId, ctx.ToolName, ctx.ExternalFolder);
+                    break;
+                // "once" / unknown → no persistence
+            }
         }
+        tcs.TrySetResult(new PermissionDecision { Allow = allow });
         return Task.CompletedTask;
     }
 
     Task<PermissionDecision> OnBrokerRequestAsync(PermissionRequest req)
     {
+        var inWorkspace = PermissionScope.IsInWorkspace(req.InputJson, _workspace, out var externalFolder);
+        // Best-effort session attribution — the broker doesn't tag requests
+        // with a session id, but in practice there's at most one in-flight
+        // session at a time. Empty when nothing's running.
+        var sessionId = _inflight.Keys.FirstOrDefault() ?? string.Empty;
+
+        // Pre-flight: skip the UI entirely if a stored rule already allows
+        // this tool at the relevant scope. Record which tier auto-allowed
+        // so a subsequent Failed observation can revoke just that rule.
+        if (PermissionRulesStore.LoadGlobal().Contains(req.ToolName))
+        {
+            TrackAutoAllow(req.ToolUseId, new AutoAllowRecord("global", req.ToolName, _workspace, sessionId, externalFolder));
+            return Task.FromResult(new PermissionDecision { Allow = true });
+        }
+        if (inWorkspace && PermissionRulesStore.LoadWorkspace(_workspace).Contains(req.ToolName))
+        {
+            TrackAutoAllow(req.ToolUseId, new AutoAllowRecord("workspace", req.ToolName, _workspace, sessionId, externalFolder));
+            return Task.FromResult(new PermissionDecision { Allow = true });
+        }
+        if (!string.IsNullOrEmpty(sessionId)
+            && _sessionRules.IsAllowed(sessionId, req.ToolName, externalFolder))
+        {
+            TrackAutoAllow(req.ToolUseId, new AutoAllowRecord("session", req.ToolName, _workspace, sessionId, externalFolder));
+            return Task.FromResult(new PermissionDecision { Allow = true });
+        }
+
         var requestId = Guid.NewGuid().ToString("N")[..8];
         var tcs = new TaskCompletionSource<PermissionDecision>();
         _pendingPermissions[requestId] = tcs;
+        _pendingPermissionContext[requestId] =
+            new PendingPermissionContext(sessionId, req.ToolName, inWorkspace, externalFolder);
         _ = Rpc?.NotifyAsync("onPermissionRequest",
-            new PermissionRequestEvent(requestId, SessionId: "", req.ToolName, req.InputJson));
+            new PermissionRequestEvent(requestId, sessionId, req.ToolName, req.InputJson, inWorkspace, externalFolder));
         return tcs.Task;
+    }
+
+    void TrackAutoAllow(string toolUseId, AutoAllowRecord rec)
+    {
+        if (string.IsNullOrEmpty(toolUseId)) return;
+        _autoAllowed[toolUseId] = rec;
+    }
+
+    // Called from OnTool's Failed branch. Revokes whichever stored rule
+    // auto-allowed this call so a future request against the same target
+    // re-prompts — guards against an old grant being silently reused after
+    // the trusted target is gone (or never existed in the first place).
+    void RevokeAutoAllow(string toolUseId)
+    {
+        if (string.IsNullOrEmpty(toolUseId)) return;
+        if (!_autoAllowed.TryRemove(toolUseId, out var rec)) return;
+        switch (rec.Tier)
+        {
+            case "global":
+                PermissionRulesStore.RemoveGlobal(rec.ToolName);
+                break;
+            case "workspace":
+                PermissionRulesStore.RemoveWorkspace(rec.WorkspacePath, rec.ToolName);
+                break;
+            case "session":
+                _sessionRules.Remove(rec.SessionId, rec.ToolName, rec.ExternalFolder);
+                break;
+        }
     }
 
     // Change tracking ------------------------------------------------------
