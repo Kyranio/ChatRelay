@@ -545,7 +545,7 @@ public partial class ChatControl : UserControl
         {
             SplitStreamingBubble();
             _streamingThinkingBlock = ThinkingBlock();
-            HistoryPanel.Children.Add(ThinkingExpander(_streamingThinkingBlock));
+            AppendToHistory(ThinkingExpander(_streamingThinkingBlock));
         }
         var full = _vm.StreamingThinking;
         var slice = _thinkingSplitOffset > 0 && _thinkingSplitOffset <= full.Length
@@ -670,7 +670,7 @@ public partial class ChatControl : UserControl
             stack.Children.Add(BuildBubbleReferencesExpander(references));
         AppendUserTextParts(stack, text);
         if (timestamp is { } ts) stack.Children.Add(BuildTimestampFooter(ts));
-        HistoryPanel.Children.Add(new Border
+        AppendToHistory(new Border
         {
             HorizontalAlignment = HorizontalAlignment.Left,
             Margin = new Thickness(3, 8, 0, 8),
@@ -721,7 +721,7 @@ public partial class ChatControl : UserControl
         {
             var tb = ThinkingBlock();
             tb.Text = thinking!;
-            HistoryPanel.Children.Add(ThinkingExpander(tb));
+            AppendToHistory(ThinkingExpander(tb));
         }
         var stack = new StackPanel();
         stack.Children.Add(new TextBlock
@@ -738,7 +738,7 @@ public partial class ChatControl : UserControl
             stack.Children.Add(footer);
         }
         if (timestamp is { } ts) stack.Children.Add(BuildTimestampFooter(ts));
-        HistoryPanel.Children.Add(new Border
+        AppendToHistory(new Border
         {
             Margin = new Thickness(0, 8, 0, 8),
             Padding = new Thickness(8),
@@ -754,7 +754,7 @@ public partial class ChatControl : UserControl
         SplitStreamingBubble();
         var tb = new TextBlock { Text = "Error: " + message, TextWrapping = TextWrapping.Wrap };
         tb.SetResourceReference(TextBlock.ForegroundProperty, EnvironmentColors.ToolWindowTextBrushKey);
-        HistoryPanel.Children.Add(new Border
+        AppendToHistory(new Border
         {
             Margin = new Thickness(0, 8, 0, 8),
             Padding = new Thickness(8),
@@ -813,7 +813,7 @@ public partial class ChatControl : UserControl
             Background = AssistantBubbleBg,
             Child = stack,
         };
-        HistoryPanel.Children.Add(bubble);
+        AppendToHistory(bubble);
         HistoryScroll.ScrollToEnd();
 
         async Task Respond(string decision, bool remember, string statusText)
@@ -880,7 +880,7 @@ public partial class ChatControl : UserControl
 
         var line = MakeToolCallLine(summary, phase);
         if (isRequested) _toolCallLines[key] = line;
-        HistoryPanel.Children.Add(line);
+        AppendToHistory(line);
         HistoryScroll.ScrollToEnd();
     }
 
@@ -989,7 +989,7 @@ public partial class ChatControl : UserControl
             Foreground = Accent,
         };
         stack.Children.Add(_streamingLabelTb);
-        HistoryPanel.Children.Add(new Border
+        AppendToHistory(new Border
         {
             Margin = new Thickness(0, 8, 0, 8),
             Padding = new Thickness(8),
@@ -1026,6 +1026,14 @@ public partial class ChatControl : UserControl
         if (_thinkingBubble is null) return;
         HistoryPanel.Children.Remove(_thinkingBubble);
         _thinkingBubble = null;
+    }
+
+    // Append to history, keeping the thinking-dots bubble pinned to the bottom.
+    void AppendToHistory(UIElement el)
+    {
+        if (_thinkingBubble is not null) HistoryPanel.Children.Remove(_thinkingBubble);
+        HistoryPanel.Children.Add(el);
+        if (_thinkingBubble is not null) HistoryPanel.Children.Add(_thinkingBubble);
     }
 
     // Re-show the dots if no chunk lands within ~600ms — covers the "model
