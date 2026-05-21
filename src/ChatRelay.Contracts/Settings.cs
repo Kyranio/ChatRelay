@@ -77,6 +77,14 @@ public class GeneralSettings
     /// traces don't flood the chat.
     /// </summary>
     public bool ThinkingExpandedByDefault { get; set; } = false;
+
+    /// <summary>
+    /// Base branch the "Review current branch" command diffs against. Null
+    /// (the default) auto-detects: tries main → master → develop → dev and
+    /// uses whichever exists. Override only if your team uses a different
+    /// default branch name.
+    /// </summary>
+    public string? CodeReviewBaseBranch { get; set; }
 }
 
 /// <summary>

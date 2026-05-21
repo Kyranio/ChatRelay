@@ -1362,6 +1362,16 @@ public partial class ChatControl : UserControl
         _vm.AppendReference(displayPath, absolutePath, startLine, endLine, content);
     }
 
+    /// <summary>Prefill the input box (replacing any draft) and focus it. Used by the review-branch command.</summary>
+    public void SetInputText(string text)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        _vm.MarkInteracted();
+        InputBox.Text = text ?? string.Empty;
+        InputBox.CaretIndex = InputBox.Text.Length;
+        InputBox.Focus();
+    }
+
     // ---- Lifecycle -------------------------------------------------------
 
     public void DisposeHost() => _vm.DisposeHost(InputBox.Text, DraftSaveOnShutdownBudget);

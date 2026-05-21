@@ -27,5 +27,8 @@ namespace ChatRelay.Chat.Views
         {
             Control?.AppendReference(displayPath, absolutePath, startLine, endLine, content);
         }
+
+        public static void SetInputTextOnWindow(string text)
+            => Control?.SetInputText(text);
     }
 }

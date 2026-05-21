@@ -6,6 +6,7 @@ namespace ChatRelay
         public const int OpenChatWindow = 0x0100;
         public const int SendSelection = 0x0101;
         public const int AddFileToClaude = 0x0102;
+        public const int ReviewCurrentBranch = 0x0104;
     }
 
     internal static class PackageGuids

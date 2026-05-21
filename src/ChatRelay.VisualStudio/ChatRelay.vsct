@@ -44,6 +44,14 @@
           <CanonicalName>.ChatRelay.AddFileToChatRelay</CanonicalName>
         </Strings>
       </Button>
+
+      <Button guid="guidClaudeCmdSet" id="cmdidReviewCurrentBranch" priority="0x0103" type="Button">
+        <Parent guid="guidClaudeCmdSet" id="ClaudeToolsGroup"/>
+        <Strings>
+          <ButtonText>Review Current Branch with ChatRelay</ButtonText>
+          <CanonicalName>.ChatRelay.ReviewCurrentBranch</CanonicalName>
+        </Strings>
+      </Button>
     </Buttons>
   </Commands>
 
@@ -63,6 +71,7 @@
       <IDSymbol name="cmdidOpenChatWindow" value="0x0100"/>
       <IDSymbol name="cmdidSendSelection" value="0x0101"/>
       <IDSymbol name="cmdidAddFileToClaude" value="0x0102"/>
+      <IDSymbol name="cmdidReviewCurrentBranch" value="0x0104"/>
     </GuidSymbol>
   </Symbols>
 </CommandTable>
