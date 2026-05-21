@@ -76,6 +76,12 @@ public partial class ChatControl : UserControl
     // bubble. Consumed once when the matching Failed tool-call event arrives
     // so it can render as a quiet "× skipped" instead of a red "⚠ failed".
     readonly HashSet<string> _recentlyDeniedKeys = new();
+
+    // Active AskUserQuestion request, if any. While set, the send button
+    // submits its typed text as the answer instead of starting a new turn,
+    // and Enter does the same — both routes call SubmitAskUserQuestionAsync.
+    (string RequestId, Border Bubble, string ToolName, List<Func<string>> AnswerBuilders)? _activeAskUserQuestion;
+
     System.Windows.Threading.DispatcherTimer? _idleDotsTimer;
 
     EnvDTE.SolutionEvents? _solutionEvents;
@@ -161,13 +167,18 @@ public partial class ChatControl : UserControl
                 // Session controls lock during a streaming turn so a
                 // mid-stream switch can't corrupt routing. The send button
                 // stays enabled and flips into a stop button — clicking it
-                // (or pressing Esc) cancels the turn.
+                // (or pressing Esc) cancels the turn. Exception: while an
+                // AskUserQuestion bubble is awaiting an answer, the button
+                // stays in send mode so the user can submit a typed answer.
                 var enabled = !_vm.IsBusy;
                 SessionBox.IsEnabled = enabled;
                 NewSessionButton.IsEnabled = enabled;
                 DeleteSessionButton.IsEnabled = enabled;
-                SendButton.Content = _vm.IsBusy ? "■" : "⏎";
-                SendButton.ToolTip = _vm.IsBusy ? "Stop (Esc)" : "Send (Enter)";
+                if (_activeAskUserQuestion is null)
+                {
+                    SendButton.Content = _vm.IsBusy ? "■" : "⏎";
+                    SendButton.ToolTip = _vm.IsBusy ? "Stop (Esc)" : "Send (Enter)";
+                }
                 break;
             case nameof(ChatViewModel.OpenLinesAdded):
             case nameof(ChatViewModel.OpenLinesRemoved):
@@ -286,6 +297,7 @@ public partial class ChatControl : UserControl
         HistoryPanel.Children.Clear();
         _toolCallLines.Clear();
         _recentlyDeniedKeys.Clear();
+        _activeAskUserQuestion = null;
         foreach (var m in opened.Messages)
         {
             if (m.Role == "user") AppendUserBubble(m.Text, references: null, timestamp: m.Timestamp);
@@ -439,7 +451,9 @@ public partial class ChatControl : UserControl
             e.Handled = true;
             // Enter during a stream is a typing event — don't fire the
             // button (which would now cancel). Esc is the keybind for stop.
-            if (_vm.IsBusy) return;
+            // Exception: while an AskUserQuestion bubble is open, Enter
+            // submits the typed text as the answer even though we're busy.
+            if (_vm.IsBusy && _activeAskUserQuestion is null) return;
             SendButton_Click(sender, new RoutedEventArgs());
         }
         else if (e.Key == Key.Escape)
@@ -451,6 +465,17 @@ public partial class ChatControl : UserControl
 
     async void SendButton_Click(object sender, RoutedEventArgs e)
     {
+        // An active AskUserQuestion bubble wins — the typed text becomes
+        // the answer, no new turn is started. Empty input falls through
+        // so the user can still cancel via Esc.
+        if (_activeAskUserQuestion is { } q)
+        {
+            var typed = InputBox.Text.Trim();
+            if (typed.Length == 0) return;
+            InputBox.Clear();
+            await SubmitAskUserQuestionAsync(typed);
+            return;
+        }
         if (_vm.IsBusy) { await _vm.CancelAsync(); return; }
         if (ModelBox.SelectedItem is not AiModel model) { SetStatus("Pick a model first."); return; }
         var text = InputBox.Text.Trim();
@@ -590,6 +615,14 @@ public partial class ChatControl : UserControl
         _thinkingSplitOffset = 0;
         _toolCallLines.Clear();
         _recentlyDeniedKeys.Clear();
+        // The turn ended; any unanswered AskUserQuestion bubble is now stale.
+        // Restore the send-button mode so the next turn renders normally.
+        if (_activeAskUserQuestion is not null)
+        {
+            _activeAskUserQuestion = null;
+            SendButton.Content = "⏎";
+            SendButton.ToolTip = "Send (Enter)";
+        }
         if (wasActive)
         {
             if (cancelled) SetStatus("Cancelled.");
@@ -767,6 +800,14 @@ public partial class ChatControl : UserControl
 
     void AppendPermissionBubble(PermissionRequestEvent p)
     {
+        // AskUserQuestion is a question, not a permission — render a
+        // dedicated bubble with option buttons so the user can answer.
+        if (string.Equals(p.ToolName, "AskUserQuestion", StringComparison.OrdinalIgnoreCase))
+        {
+            AppendQuestionBubble(p);
+            return;
+        }
+
         SplitStreamingBubble();
 
         var stack = new StackPanel();
@@ -852,6 +893,198 @@ public partial class ChatControl : UserControl
                 statusText: p.InWorkspace ? "✓ Allowed in workspace" : "✓ Allowed for session");
         if (forever is not null)
             forever.Click += async (_, _) => await Respond("allow", scope: "global", "✓ Allowed forever");
+    }
+
+    // ---- AskUserQuestion bubble -----------------------------------------
+
+    void AppendQuestionBubble(PermissionRequestEvent p)
+    {
+        SplitStreamingBubble();
+
+        var questions = ParseAskUserQuestions(p.InputJson);
+        if (questions.Count == 0)
+        {
+            // Malformed input — deny silently so the model isn't stuck.
+            _ = _vm.Host?.RespondPermissionAsync(p.RequestId, "deny", "once",
+                "Could not parse AskUserQuestion payload.");
+            return;
+        }
+
+        var stack = new StackPanel();
+        var header = new TextBlock
+        {
+            Text = "❓ " + (questions.Count == 1 ? "Question" : $"Questions ({questions.Count})"),
+            FontWeight = FontWeights.Bold,
+            Margin = new Thickness(0, 0, 0, 6),
+        };
+        header.SetResourceReference(TextBlock.ForegroundProperty, EnvironmentColors.ToolWindowTextBrushKey);
+        stack.Children.Add(header);
+
+        var answerBuilders = new List<Func<string>>();
+        foreach (var q in questions)
+            answerBuilders.Add(AppendQuestionBlock(stack, q));
+
+        var submit = PermissionButton("Submit", "PermissionAllowOnceButtonStyle");
+        var buttons = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 8, 0, 0) };
+        buttons.Children.Add(submit);
+        stack.Children.Add(buttons);
+
+        var bubble = new Border
+        {
+            Margin = new Thickness(0, 8, 0, 8),
+            Padding = new Thickness(8),
+            CornerRadius = new CornerRadius(4),
+            Background = AssistantBubbleBg,
+            Child = stack,
+        };
+        HistoryPanel.Children.Add(bubble);
+        HistoryScroll.ScrollToEnd();
+
+        // Park the request and force the send button into "submit" mode so
+        // the user's typed text can also become the answer.
+        _activeAskUserQuestion = (p.RequestId, bubble, p.ToolName, answerBuilders);
+        SendButton.Content = "⏎";
+        SendButton.ToolTip = "Submit answer (Enter)";
+
+        submit.Click += async (_, _) =>
+        {
+            var answer = string.Join("\n\n", answerBuilders.Select(b => b()));
+            await SubmitAskUserQuestionAsync(answer);
+        };
+    }
+
+    // One question block: optional header chip + question text + the options
+    // (radio buttons for single-select, checkboxes for multi). Returns a
+    // closure that yields this question's piece of the answer at submit time.
+    Func<string> AppendQuestionBlock(StackPanel host, AskQuestion q)
+    {
+        if (!string.IsNullOrEmpty(q.Header))
+        {
+            var chip = new Border
+            {
+                CornerRadius = new CornerRadius(3),
+                Padding = new Thickness(6, 1, 6, 1),
+                Margin = new Thickness(0, 4, 0, 2),
+                HorizontalAlignment = HorizontalAlignment.Left,
+                Child = new TextBlock { Text = q.Header, FontSize = 10, FontWeight = FontWeights.SemiBold },
+            };
+            chip.SetResourceReference(Border.BackgroundProperty, EnvironmentColors.ComboBoxBackgroundBrushKey);
+            host.Children.Add(chip);
+        }
+
+        var text = new TextBlock { Text = q.Question, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 4) };
+        text.SetResourceReference(TextBlock.ForegroundProperty, EnvironmentColors.ToolWindowTextBrushKey);
+        host.Children.Add(text);
+
+        var optionsPanel = new StackPanel { Margin = new Thickness(12, 0, 0, 8) };
+        var groupName = "q_" + Guid.NewGuid().ToString("N").Substring(0, 8);
+        var selectors = new List<(ToggleButton Toggle, AskOption Option)>();
+
+        foreach (var opt in q.Options)
+        {
+            var label = string.IsNullOrEmpty(opt.Description)
+                ? opt.Label
+                : opt.Label + "  —  " + opt.Description;
+            ToggleButton tb = q.MultiSelect
+                ? new CheckBox { Content = label, Margin = new Thickness(0, 2, 0, 2) }
+                : new RadioButton { Content = label, GroupName = groupName, Margin = new Thickness(0, 2, 0, 2) };
+            tb.SetResourceReference(ToggleButton.ForegroundProperty, EnvironmentColors.ToolWindowTextBrushKey);
+            optionsPanel.Children.Add(tb);
+            selectors.Add((tb, opt));
+        }
+
+        var otherLabel = new TextBlock { Text = "Other:", FontSize = 11, Margin = new Thickness(0, 6, 0, 2) };
+        otherLabel.SetResourceReference(TextBlock.ForegroundProperty, EnvironmentColors.ToolWindowTextBrushKey);
+        optionsPanel.Children.Add(otherLabel);
+
+        var other = new TextBox
+        {
+            FontSize = 11,
+            Padding = new Thickness(4),
+            BorderThickness = new Thickness(1),
+            AcceptsReturn = false,
+        };
+        other.SetResourceReference(TextBox.BackgroundProperty, EnvironmentColors.ComboBoxBackgroundBrushKey);
+        other.SetResourceReference(TextBox.ForegroundProperty, EnvironmentColors.ToolWindowTextBrushKey);
+        other.SetResourceReference(TextBox.BorderBrushProperty, EnvironmentColors.ComboBoxBorderBrushKey);
+        optionsPanel.Children.Add(other);
+
+        host.Children.Add(optionsPanel);
+
+        var qLocal = q;
+        return () =>
+        {
+            var picked = selectors.Where(t => t.Toggle.IsChecked == true).Select(t => t.Option.Label).ToList();
+            var otherText = other.Text?.Trim() ?? string.Empty;
+            if (!string.IsNullOrEmpty(otherText)) picked.Add("(other) " + otherText);
+            var answer = picked.Count == 0 ? "(no answer)" : string.Join(", ", picked);
+            return "Q: " + qLocal.Question + "\nA: " + answer;
+        };
+    }
+
+    async Task SubmitAskUserQuestionAsync(string answer)
+    {
+        if (_activeAskUserQuestion is not { } q) return;
+        _activeAskUserQuestion = null;
+
+        // Restore the send-button mode the rest of the UI expects.
+        SendButton.Content = _vm.IsBusy ? "■" : "⏎";
+        SendButton.ToolTip = _vm.IsBusy ? "Stop (Esc)" : "Send (Enter)";
+
+        CollapsePermissionBubble(q.Bubble, "✓ Answered", q.ToolName);
+        try
+        {
+            if (_vm.Host is not null)
+                await _vm.Host.RespondPermissionAsync(q.RequestId, "deny", "once", answer);
+        }
+        catch { }
+    }
+
+    sealed class AskOption
+    {
+        public string Label = string.Empty;
+        public string Description = string.Empty;
+    }
+    sealed class AskQuestion
+    {
+        public string Question = string.Empty;
+        public string Header = string.Empty;
+        public bool MultiSelect;
+        public List<AskOption> Options = new();
+    }
+
+    static List<AskQuestion> ParseAskUserQuestions(string inputJson)
+    {
+        var result = new List<AskQuestion>();
+        if (string.IsNullOrEmpty(inputJson)) return result;
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(inputJson);
+            if (!doc.RootElement.TryGetProperty("questions", out var qs)
+                || qs.ValueKind != System.Text.Json.JsonValueKind.Array)
+                return result;
+
+            foreach (var q in qs.EnumerateArray())
+            {
+                var question = q.TryGetProperty("question", out var qt) ? (qt.GetString() ?? "") : "";
+                var hdr = q.TryGetProperty("header", out var h) ? (h.GetString() ?? "") : "";
+                var multi = q.TryGetProperty("multiSelect", out var ms) && ms.ValueKind == System.Text.Json.JsonValueKind.True;
+                var options = new List<AskOption>();
+                if (q.TryGetProperty("options", out var opts) && opts.ValueKind == System.Text.Json.JsonValueKind.Array)
+                {
+                    foreach (var o in opts.EnumerateArray())
+                    {
+                        var lbl = o.TryGetProperty("label", out var l) ? (l.GetString() ?? "") : "";
+                        var desc = o.TryGetProperty("description", out var d) ? (d.GetString() ?? "") : "";
+                        if (!string.IsNullOrEmpty(lbl)) options.Add(new AskOption { Label = lbl, Description = desc });
+                    }
+                }
+                if (!string.IsNullOrEmpty(question))
+                    result.Add(new AskQuestion { Question = question, Header = hdr, MultiSelect = multi, Options = options });
+            }
+        }
+        catch { /* malformed → empty list signals the caller to bail */ }
+        return result;
     }
 
     // Shorten a long absolute path for the button label — keep the leading

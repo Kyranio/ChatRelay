@@ -92,7 +92,12 @@ public record PermissionRequestEvent(
 //   "session"   — remember (toolName, ExternalFolder) for this session only
 //   "workspace" — remember toolName for the active workspace (persists across VS restarts)
 //   "global"    — remember toolName for every workspace (persists across VS restarts)
-public record RespondPermissionParams(string RequestId, string Decision, string Scope);
+//
+// Message: optional payload used for AskUserQuestion. When set, the broker
+// echoes it through as the tool_result content so the model sees the user's
+// answer text. Decision is "deny" for AskUserQuestion answers (we don't
+// actually run the tool — the message IS the answer).
+public record RespondPermissionParams(string RequestId, string Decision, string Scope, string? Message = null);
 
 // Tool-call observations ------------------------------------------------------
 //
