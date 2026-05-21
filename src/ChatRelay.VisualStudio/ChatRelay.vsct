@@ -44,6 +44,14 @@
           <CanonicalName>.ChatRelay.AddFileToChatRelay</CanonicalName>
         </Strings>
       </Button>
+
+      <Button guid="guidClaudeCmdSet" id="cmdidSendTestOutputToClaude" priority="0x0104" type="Button">
+        <Parent guid="guidClaudeCmdSet" id="ClaudeToolsGroup"/>
+        <Strings>
+          <ButtonText>Send Test Output to ChatRelay</ButtonText>
+          <CanonicalName>.ChatRelay.SendTestOutputToChatRelay</CanonicalName>
+        </Strings>
+      </Button>
     </Buttons>
   </Commands>
 
@@ -51,6 +59,9 @@
     <!-- Ctrl+Alt+S sends the current selection to Claude. -->
     <KeyBinding guid="guidClaudeCmdSet" id="cmdidSendSelection"
                 editor="guidVSStd97" key1="S" mod1="Control Alt"/>
+    <!-- Ctrl+Alt+T pulls clipboard contents (test output) into the chat. -->
+    <KeyBinding guid="guidClaudeCmdSet" id="cmdidSendTestOutputToClaude"
+                editor="guidVSStd97" key1="T" mod1="Control Alt"/>
   </KeyBindings>
 
   <Symbols>
@@ -63,6 +74,7 @@
       <IDSymbol name="cmdidOpenChatWindow" value="0x0100"/>
       <IDSymbol name="cmdidSendSelection" value="0x0101"/>
       <IDSymbol name="cmdidAddFileToClaude" value="0x0102"/>
+      <IDSymbol name="cmdidSendTestOutputToClaude" value="0x0105"/>
     </GuidSymbol>
   </Symbols>
 </CommandTable>
