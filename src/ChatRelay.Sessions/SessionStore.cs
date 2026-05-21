@@ -314,6 +314,9 @@ namespace ChatRelay.Chat
         /// before this field existed.
         /// </summary>
         public string? Model { get; set; }
+
+        /// <summary>True when the user cancelled this turn mid-stream — the bubble holds whatever text streamed before the stop.</summary>
+        public bool Cancelled { get; set; }
     }
 
     public class PersistedUsage

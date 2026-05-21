@@ -289,7 +289,7 @@ public partial class ChatControl : UserControl
         foreach (var m in opened.Messages)
         {
             if (m.Role == "user") AppendUserBubble(m.Text, references: null, timestamp: m.Timestamp);
-            else AppendAssistantBubbleStatic(m.Text, m.Thinking, m.Usage, m.Model, m.Timestamp);
+            else AppendAssistantBubbleStatic(m.Text, m.Thinking, m.Usage, m.Model, m.Timestamp, m.Cancelled);
         }
         HistoryScroll.ScrollToEnd();
         InputBox.Text = opened.DraftText ?? string.Empty;
@@ -576,11 +576,14 @@ public partial class ChatControl : UserControl
         StopIdleDotsTimer();
         HideThinkingDots();
         // Append a timestamp footer to the just-finished assistant bubble
-        // so streamed turns match the historical render. Only when the
-        // bubble was actually built (chunks arrived) and not cancelled
-        // before any content.
-        if (_streamingStack is not null && !cancelled)
-            _streamingStack.Children.Add(BuildTimestampFooter(DateTime.Now));
+        // so streamed turns match the historical render. On cancel, replace
+        // with a "(cancelled by user)" marker so the in-place bubble matches
+        // what the next session reload will show.
+        if (_streamingStack is not null)
+        {
+            if (cancelled) _streamingStack.Children.Add(BuildCancelledFooter());
+            else _streamingStack.Children.Add(BuildTimestampFooter(DateTime.Now));
+        }
         _streamingStack = null;
         _streamingLabelTb = null;
         _streamingMarkdownView = null;
@@ -682,6 +685,20 @@ public partial class ChatControl : UserControl
         HistoryScroll.ScrollToEnd();
     }
 
+    static TextBlock BuildCancelledFooter()
+    {
+        var tb = new TextBlock
+        {
+            Text = "(cancelled by user)",
+            FontSize = 10,
+            FontStyle = FontStyles.Italic,
+            Opacity = 0.6,
+            Margin = new Thickness(0, 4, 0, 0),
+        };
+        tb.SetResourceReference(TextBlock.ForegroundProperty, EnvironmentColors.ToolWindowTextBrushKey);
+        return tb;
+    }
+
     static TextBlock BuildTimestampFooter(DateTime ts)
     {
         var tb = new TextBlock
@@ -713,7 +730,7 @@ public partial class ChatControl : UserControl
         return expander;
     }
 
-    void AppendAssistantBubbleStatic(string text, string? thinking, UsagePayload? usage, string? model, DateTime? timestamp = null)
+    void AppendAssistantBubbleStatic(string text, string? thinking, UsagePayload? usage, string? model, DateTime? timestamp = null, bool cancelled = false)
     {
         // Thinking renders as its own small unboxed expander above the
         // assistant bubble, matching the live streaming layout.
@@ -737,6 +754,7 @@ public partial class ChatControl : UserControl
             footer.Text = FormatUsage(usage);
             stack.Children.Add(footer);
         }
+        if (cancelled) stack.Children.Add(BuildCancelledFooter());
         if (timestamp is { } ts) stack.Children.Add(BuildTimestampFooter(ts));
         AppendToHistory(new Border
         {
