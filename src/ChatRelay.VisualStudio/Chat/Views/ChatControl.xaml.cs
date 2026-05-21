@@ -794,13 +794,30 @@ public partial class ChatControl : UserControl
         preview.SetResourceReference(TextBox.ForegroundProperty, EnvironmentColors.ToolWindowTextBrushKey);
         stack.Children.Add(preview);
 
-        var buttons = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 8, 0, 0) };
+        // In-workspace requests get a 4th "Allow forever" button. Outside-
+        // workspace requests label their "Allow always" with the folder so
+        // the user knows the scope they're committing to.
+        var buttons = new WrapPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 8, 0, 0) };
         var deny = PermissionButton("Deny", "PermissionDenyButtonStyle");
         var once = PermissionButton("Allow once", "PermissionAllowOnceButtonStyle");
-        var always = PermissionButton("Allow always", "PermissionAllowAlwaysButtonStyle");
+        Button alwaysScope;
+        Button? forever = null;
+        if (p.InWorkspace)
+        {
+            alwaysScope = PermissionButton("Allow always in this workspace", "PermissionAllowAlwaysButtonStyle");
+            forever = PermissionButton("Allow forever (any workspace)", "PermissionAllowAlwaysButtonStyle");
+        }
+        else
+        {
+            var folderLabel = string.IsNullOrEmpty(p.ExternalFolder)
+                ? "Allow always for this session"
+                : "Allow always for " + ShortenPath(p.ExternalFolder) + " (this session)";
+            alwaysScope = PermissionButton(folderLabel, "PermissionAllowAlwaysButtonStyle");
+        }
         buttons.Children.Add(deny);
         buttons.Children.Add(once);
-        buttons.Children.Add(always);
+        buttons.Children.Add(alwaysScope);
+        if (forever is not null) buttons.Children.Add(forever);
         stack.Children.Add(buttons);
 
         // Same styling as the assistant bubble — the internal layout (header
@@ -816,20 +833,34 @@ public partial class ChatControl : UserControl
         HistoryPanel.Children.Add(bubble);
         HistoryScroll.ScrollToEnd();
 
-        async Task Respond(string decision, bool remember, string statusText)
+        async Task Respond(string decision, string scope, string statusText)
         {
             CollapsePermissionBubble(bubble, statusText, p.ToolName);
-            try { if (_vm.Host is not null) await _vm.Host.RespondPermissionAsync(p.RequestId, decision, remember); }
+            try { if (_vm.Host is not null) await _vm.Host.RespondPermissionAsync(p.RequestId, decision, scope); }
             catch { }
         }
 
         deny.Click += async (_, _) =>
         {
             _recentlyDeniedKeys.Add(p.ToolName + "|" + p.InputJson);
-            await Respond("deny", remember: false, "× Denied");
+            await Respond("deny", scope: "once", "× Denied");
         };
-        once.Click += async (_, _) => await Respond("allow", remember: false, "✓ Allowed once");
-        always.Click += async (_, _) => await Respond("allow", remember: true, "✓ Allowed always");
+        once.Click += async (_, _) => await Respond("allow", scope: "once", "✓ Allowed once");
+        alwaysScope.Click += async (_, _) =>
+            await Respond("allow",
+                scope: p.InWorkspace ? "workspace" : "session",
+                statusText: p.InWorkspace ? "✓ Allowed in workspace" : "✓ Allowed for session");
+        if (forever is not null)
+            forever.Click += async (_, _) => await Respond("allow", scope: "global", "✓ Allowed forever");
+    }
+
+    // Shorten a long absolute path for the button label — keep the leading
+    // drive / root and the tail, ellipsis the middle.
+    static string ShortenPath(string path)
+    {
+        const int max = 40;
+        if (path.Length <= max) return path;
+        return path.Substring(0, 12) + "…" + path.Substring(path.Length - (max - 13));
     }
 
     /// <summary>

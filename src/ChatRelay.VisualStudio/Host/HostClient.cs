@@ -121,8 +121,8 @@ public sealed class HostClient : IDisposable
     public Task RemoveMcpFileAsync(string path) =>
         _rpc.InvokeWithParameterObjectAsync("removeMcpFile", new RemoveMcpFileParams(path));
 
-    public Task RespondPermissionAsync(string requestId, string decision, bool remember) =>
-        _rpc.InvokeWithParameterObjectAsync("respondPermission", new RespondPermissionParams(requestId, decision, remember));
+    public Task RespondPermissionAsync(string requestId, string decision, string scope) =>
+        _rpc.InvokeWithParameterObjectAsync("respondPermission", new RespondPermissionParams(requestId, decision, scope));
 
     // Change tracking ----------------------------------------------------
     //

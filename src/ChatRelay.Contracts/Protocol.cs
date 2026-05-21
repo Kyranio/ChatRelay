@@ -78,8 +78,21 @@ public record RemoveMcpFileParams(string Path);
 
 // Permissions ----------------------------------------------------------------
 
-public record PermissionRequestEvent(string RequestId, string SessionId, string ToolName, string InputJson);
-public record RespondPermissionParams(string RequestId, string Decision, bool Remember);
+// InWorkspace: the request's paths all sit under the active workspace root —
+//   if false the shell shows 3 buttons (Deny / Allow once / Allow always for
+//   this folder this session) and ExternalFolder names the lowest-point
+//   parent. If true the shell shows 4 buttons (Deny / Allow once / Allow
+//   always in this workspace / Allow forever in any workspace).
+public record PermissionRequestEvent(
+    string RequestId, string SessionId, string ToolName, string InputJson,
+    bool InWorkspace, string ExternalFolder);
+
+// Scope:
+//   "once"      — allow this call only (default; "Remember" off in old wire)
+//   "session"   — remember (toolName, ExternalFolder) for this session only
+//   "workspace" — remember toolName for the active workspace (persists across VS restarts)
+//   "global"    — remember toolName for every workspace (persists across VS restarts)
+public record RespondPermissionParams(string RequestId, string Decision, string Scope);
 
 // Tool-call observations ------------------------------------------------------
 //

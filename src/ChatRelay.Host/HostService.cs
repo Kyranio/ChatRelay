@@ -21,7 +21,13 @@ public sealed class HostService
     readonly ChangeTracker _changes = new();
     readonly ConcurrentDictionary<string, CancellationTokenSource> _inflight = new();
     readonly ConcurrentDictionary<string, TaskCompletionSource<PermissionDecision>> _pendingPermissions = new();
+    // Side-table to RespondPermissionAsync — carries the context we'd otherwise
+    // need the shell to echo back (toolName + scope info for persistence).
+    readonly ConcurrentDictionary<string, PendingPermissionContext> _pendingPermissionContext = new();
+    readonly SessionRules _sessionRules = new();
     string? _workspace;
+
+    record PendingPermissionContext(string SessionId, string ToolName, bool InWorkspace, string ExternalFolder);
 
     public JsonRpc? Rpc { get; set; }
     public string BrokerPipeName => _broker.PipeName;
@@ -399,24 +405,55 @@ public sealed class HostService
     [JsonRpcMethod("respondPermission", UseSingleObjectParameterDeserialization = true)]
     public Task RespondPermissionAsync(RespondPermissionParams p)
     {
-        if (_pendingPermissions.TryRemove(p.RequestId, out var tcs))
+        if (!_pendingPermissions.TryRemove(p.RequestId, out var tcs)) return Task.CompletedTask;
+        _pendingPermissionContext.TryRemove(p.RequestId, out var ctx);
+
+        var allow = p.Decision.Equals("allow", StringComparison.OrdinalIgnoreCase);
+        if (allow && ctx is not null)
         {
-            tcs.TrySetResult(new PermissionDecision
+            switch ((p.Scope ?? "once").ToLowerInvariant())
             {
-                Allow = p.Decision.Equals("allow", StringComparison.OrdinalIgnoreCase),
-                AlwaysAllow = p.Remember,
-            });
+                case "global":
+                    PermissionRulesStore.AddGlobal(ctx.ToolName);
+                    break;
+                case "workspace":
+                    PermissionRulesStore.AddWorkspace(_workspace, ctx.ToolName);
+                    break;
+                case "session":
+                    _sessionRules.Add(ctx.SessionId, ctx.ToolName, ctx.ExternalFolder);
+                    break;
+                // "once" / unknown → no persistence
+            }
         }
+        tcs.TrySetResult(new PermissionDecision { Allow = allow });
         return Task.CompletedTask;
     }
 
     Task<PermissionDecision> OnBrokerRequestAsync(PermissionRequest req)
     {
+        var inWorkspace = PermissionScope.IsInWorkspace(req.InputJson, _workspace, out var externalFolder);
+        // Best-effort session attribution — the broker doesn't tag requests
+        // with a session id, but in practice there's at most one in-flight
+        // session at a time. Empty when nothing's running.
+        var sessionId = _inflight.Keys.FirstOrDefault() ?? string.Empty;
+
+        // Pre-flight: skip the UI entirely if a stored rule already allows
+        // this tool at the relevant scope.
+        if (PermissionRulesStore.LoadGlobal().Contains(req.ToolName))
+            return Task.FromResult(new PermissionDecision { Allow = true });
+        if (inWorkspace && PermissionRulesStore.LoadWorkspace(_workspace).Contains(req.ToolName))
+            return Task.FromResult(new PermissionDecision { Allow = true });
+        if (!string.IsNullOrEmpty(sessionId)
+            && _sessionRules.IsAllowed(sessionId, req.ToolName, externalFolder))
+            return Task.FromResult(new PermissionDecision { Allow = true });
+
         var requestId = Guid.NewGuid().ToString("N")[..8];
         var tcs = new TaskCompletionSource<PermissionDecision>();
         _pendingPermissions[requestId] = tcs;
+        _pendingPermissionContext[requestId] =
+            new PendingPermissionContext(sessionId, req.ToolName, inWorkspace, externalFolder);
         _ = Rpc?.NotifyAsync("onPermissionRequest",
-            new PermissionRequestEvent(requestId, SessionId: "", req.ToolName, req.InputJson));
+            new PermissionRequestEvent(requestId, sessionId, req.ToolName, req.InputJson, inWorkspace, externalFolder));
         return tcs.Task;
     }
 
