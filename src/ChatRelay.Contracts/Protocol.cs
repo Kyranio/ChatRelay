@@ -51,7 +51,7 @@ public record OpenSessionResult(string SessionId, string? AdapterId, string? Mod
 public record DeleteSessionParams(string SessionId);
 public record SetSessionDraftParams(string SessionId, string Text);
 
-public record SessionMessage(string Role, string Text, string? Thinking, UsagePayload? Usage, string? Model = null, DateTime? Timestamp = null);
+public record SessionMessage(string Role, string Text, string? Thinking, UsagePayload? Usage, string? Model = null, DateTime? Timestamp = null, bool Cancelled = false);
 public record UsagePayload(int InputTokens, int OutputTokens, int CacheReadTokens, int CacheCreateTokens, double? CostUsd);
 
 // Settings -------------------------------------------------------------------

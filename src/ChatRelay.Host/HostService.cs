@@ -150,7 +150,8 @@ public sealed class HostService
                     m.Usage.CacheReadTokens, m.Usage.CacheWriteTokens,
                     m.Usage.CostUsd),
                 m.Model,
-                m.Timestamp))
+                m.Timestamp,
+                m.Cancelled))
             .ToList();
         return new OpenSessionResult(index.ToString(), ps.AdapterId, ps.ModelId, ps.DraftText, messages);
     }
@@ -283,7 +284,14 @@ public sealed class HostService
             await adapter.SendPromptAsync(BuildRequest(p, adapter), cts.Token);
             PersistTurn(p, finalText.ToString(), finalThinking.ToString(), finalUsage, assignedSession, adapter.Id, finalModel);
         }
-        catch (OperationCanceledException) { cancelled = true; }
+        catch (OperationCanceledException)
+        {
+            cancelled = true;
+            // Persist what streamed before the stop so the next turn (API
+            // adapter) and the chat history (CLI adapter) both see the
+            // user's question and the model's partial answer.
+            PersistTurn(p, finalText.ToString(), finalThinking.ToString(), finalUsage, assignedSession, adapter.Id, finalModel, cancelled: true);
+        }
         catch (Exception ex)
         {
             await (Rpc?.NotifyAsync("onError", new ErrorEvent(p.SessionId, ex.Message)) ?? Task.CompletedTask);
@@ -602,7 +610,7 @@ public sealed class HostService
             .ToList();
     }
 
-    void PersistTurn(SendPromptParams p, string assistantText, string thinking, AiUsage? usage, string? remoteSessionId, string adapterId, string? model)
+    void PersistTurn(SendPromptParams p, string assistantText, string thinking, AiUsage? usage, string? remoteSessionId, string adapterId, string? model, bool cancelled = false)
     {
         var sessions = SessionStore.Load(_workspace);
         if (!int.TryParse(p.SessionId, out var i) || i < 0 || i >= sessions.Count) return;
@@ -628,6 +636,7 @@ public sealed class HostService
             },
             Timestamp = DateTime.UtcNow,
             Model = model,
+            Cancelled = cancelled,
         });
 
         SessionStore.Save(_workspace, sessions);
