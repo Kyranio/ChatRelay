@@ -425,7 +425,7 @@ public sealed class HostService
                 // "once" / unknown → no persistence
             }
         }
-        tcs.TrySetResult(new PermissionDecision { Allow = allow });
+        tcs.TrySetResult(new PermissionDecision { Allow = allow, Message = p.Message });
         return Task.CompletedTask;
     }
 
